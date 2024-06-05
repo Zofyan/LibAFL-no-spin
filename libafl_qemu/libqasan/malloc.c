@@ -88,17 +88,10 @@ static struct chunk_begin *quarantine_top;
 static struct chunk_begin *quarantine_end;
 static size_t              quarantine_bytes;
 
-#ifdef __BIONIC__
 static pthread_mutex_t quarantine_lock;
   #define LOCK_TRY pthread_mutex_trylock
   #define LOCK_INIT pthread_mutex_init
   #define LOCK_UNLOCK pthread_mutex_unlock
-#else
-static pthread_spinlock_t quarantine_lock;
-  #define LOCK_TRY pthread_spin_trylock
-  #define LOCK_INIT pthread_spin_init
-  #define LOCK_UNLOCK pthread_spin_unlock
-#endif
 
 // need qasan disabled
 static int quarantine_push(struct chunk_begin *ck) {
