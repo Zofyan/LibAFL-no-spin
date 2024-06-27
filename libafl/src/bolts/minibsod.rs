@@ -633,16 +633,16 @@ pub fn generate_minibsod<W: Write>(
     write_crash(writer, signal, ucontext)?;
     writeln!(writer, "{:━^100}", " REGISTERS ")?;
     dump_registers(writer, ucontext)?;
-    writeln!(writer, "{:━^100}", " BACKTRACE ")?;
-    writeln!(writer, "{:?}", backtrace::Backtrace::new())?;
+    //writeln!(writer, "{:━^100}", " BACKTRACE ")?;
+    //writeln!(writer, "{:?}", backtrace::Backtrace::new())?;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        writeln!(writer, "{:━^100}", " MAPS ")?;
+        //writeln!(writer, "{:━^100}", " MAPS ")?;
 
-        match std::fs::read_to_string("/proc/self/maps") {
-            Ok(maps) => writer.write_all(maps.as_bytes())?,
-            Err(e) => writeln!(writer, "Couldn't load mappings: {e:?}")?,
-        };
+        //match std::fs::read_to_string("/proc/self/maps") {
+        //    Ok(maps) => writer.write_all(maps.as_bytes())?,
+        //    Err(e) => writeln!(writer, "Couldn't load mappings: {e:?}")?,
+        //};
     }
 
     #[cfg(target_os = "freebsd")]
