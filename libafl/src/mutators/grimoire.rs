@@ -11,8 +11,8 @@ use crate::{
     inputs::{GeneralizedInputMetadata, GeneralizedItem},
     mutators::{token_mutations::Tokens, MutationResult, Mutator},
     random_corpus_id,
-    state::{HasCorpus, HasMetadata, HasRand},
-    Error,
+    state::{HasCorpus, HasRand},
+    Error, HasMetadata,
 };
 
 const RECURSIVE_REPLACEMENT_DEPTH: [usize; 6] = [2, 4, 8, 16, 32, 64];
@@ -122,7 +122,6 @@ where
         &mut self,
         state: &mut S,
         generalised_meta: &mut GeneralizedInputMetadata,
-        _stage_idx: i32,
     ) -> Result<MutationResult, Error> {
         extend_with_random_generalized(
             state,
@@ -163,7 +162,6 @@ where
         &mut self,
         state: &mut S,
         generalised_meta: &mut GeneralizedInputMetadata,
-        _stage_idx: i32,
     ) -> Result<MutationResult, Error> {
         let mut mutated = MutationResult::Skipped;
 
@@ -236,7 +234,6 @@ where
         &mut self,
         state: &mut S,
         generalised_meta: &mut GeneralizedInputMetadata,
-        _stage_idx: i32,
     ) -> Result<MutationResult, Error> {
         let tokens_len = {
             let meta = state.metadata_map().get::<Tokens>();
@@ -347,7 +344,6 @@ where
         &mut self,
         state: &mut S,
         generalised_meta: &mut GeneralizedInputMetadata,
-        _stage_idx: i32,
     ) -> Result<MutationResult, Error> {
         let gen = generalised_meta.generalized_mut();
 

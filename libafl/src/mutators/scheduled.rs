@@ -28,8 +28,8 @@ use crate::{
         token_mutations::{TokenInsert, TokenReplace},
         MutationResult, Mutator, MutatorsTuple,
     },
-    state::{HasCorpus, HasMetadata, HasRand},
-    Error,
+    state::{HasCorpus, HasRand},
+    Error, HasMetadata,
 };
 
 /// The metadata placed in a [`crate::corpus::Testcase`] by a [`LoggerScheduledMutator`].
@@ -93,19 +93,12 @@ where
 
     /// New default implementation for mutate.
     /// Implementations must forward `mutate()` to this method
-    fn scheduled_mutate(
-        &mut self,
-        state: &mut S,
-        input: &mut I,
-        stage_idx: i32,
-    ) -> Result<MutationResult, Error> {
+    fn scheduled_mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
         let mut r = MutationResult::Skipped;
         let num = self.iterations(state, input);
         for _ in 0..num {
             let idx = self.schedule(state, input);
-            let outcome = self
-                .mutations_mut()
-                .get_and_mutate(idx, state, input, stage_idx)?;
+            let outcome = self.mutations_mut().get_and_mutate(idx, state, input)?;
             if outcome == MutationResult::Mutated {
                 r = MutationResult::Mutated;
             }
@@ -157,13 +150,8 @@ where
     S: HasRand,
 {
     #[inline]
-    fn mutate(
-        &mut self,
-        state: &mut S,
-        input: &mut I,
-        stage_idx: i32,
-    ) -> Result<MutationResult, Error> {
-        self.scheduled_mutate(state, input, stage_idx)
+    fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
+        self.scheduled_mutate(state, input)
     }
 }
 
@@ -197,8 +185,8 @@ where
 
     /// Get the next mutation to apply
     fn schedule(&self, state: &mut S, _: &I) -> MutationId {
-        debug_assert!(!self.mutations().is_empty());
-        state.rand_mut().below(self.mutations().len() as u64).into()
+        debug_assert!(self.mutations.len() != 0);
+        state.rand_mut().below(self.mutations.len() as u64).into()
     }
 }
 
@@ -258,10 +246,11 @@ pub type HavocMutationsNoCrossoverType = tuple_list_type!(
 );
 
 /// Tuple type of the mutations that compose the Havoc mutator's crossover mutations
-pub type HavocCrossoverType = tuple_list_type!(CrossoverInsertMutator, CrossoverReplaceMutator);
+pub type HavocCrossoverType<I> =
+    tuple_list_type!(CrossoverInsertMutator<I>, CrossoverReplaceMutator<I>);
 
 /// Tuple type of the mutations that compose the Havoc mutator
-pub type HavocMutationsType = tuple_list_type!(
+pub type HavocMutationsType<I> = tuple_list_type!(
     BitFlipMutator,
     ByteFlipMutator,
     ByteIncMutator,
@@ -287,8 +276,8 @@ pub type HavocMutationsType = tuple_list_type!(
     BytesCopyMutator,
     BytesInsertCopyMutator,
     BytesSwapMutator,
-    CrossoverInsertMutator,
-    CrossoverReplaceMutator,
+    CrossoverInsertMutator<I>,
+    CrossoverReplaceMutator<I>,
 );
 
 /// Get the mutations that compose the Havoc mutator (only applied to single inputs)
@@ -325,7 +314,7 @@ pub fn havoc_mutations_no_crossover() -> HavocMutationsNoCrossoverType {
 
 /// Get the mutations that compose the Havoc mutator's crossover strategy
 #[must_use]
-pub fn havoc_crossover() -> HavocCrossoverType {
+pub fn havoc_crossover<I>() -> HavocCrossoverType<I> {
     tuple_list!(
         CrossoverInsertMutator::new(),
         CrossoverReplaceMutator::new(),
@@ -334,14 +323,14 @@ pub fn havoc_crossover() -> HavocCrossoverType {
 
 /// Get the mutations that compose the Havoc mutator
 #[must_use]
-pub fn havoc_mutations() -> HavocMutationsType {
+pub fn havoc_mutations<I>() -> HavocMutationsType<I> {
     havoc_mutations_no_crossover().merge(havoc_crossover())
 }
 
 /// Get the mutations that uses the Tokens metadata
 #[must_use]
 pub fn tokens_mutations() -> tuple_list_type!(TokenInsert, TokenReplace) {
-    tuple_list!(TokenInsert::new(), TokenReplace::new(),)
+    tuple_list!(TokenInsert::new(), TokenReplace::new())
 }
 
 /// A logging [`Mutator`] that wraps around a [`StdScheduledMutator`].
@@ -367,7 +356,7 @@ where
         write!(
             f,
             "LoggerScheduledMutator with {} mutations for Input type {}",
-            self.scheduled.mutations().len(),
+            MT::LEN,
             core::any::type_name::<I>()
         )
     }
@@ -390,21 +379,11 @@ where
     S: HasRand + HasCorpus,
     SM: ScheduledMutator<I, MT, S>,
 {
-    fn mutate(
-        &mut self,
-        state: &mut S,
-        input: &mut I,
-        stage_idx: i32,
-    ) -> Result<MutationResult, Error> {
-        self.scheduled_mutate(state, input, stage_idx)
+    fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
+        self.scheduled_mutate(state, input)
     }
 
-    fn post_exec(
-        &mut self,
-        state: &mut S,
-        _stage_idx: i32,
-        corpus_idx: Option<CorpusId>,
-    ) -> Result<(), Error> {
+    fn post_exec(&mut self, state: &mut S, corpus_idx: Option<CorpusId>) -> Result<(), Error> {
         if let Some(idx) = corpus_idx {
             let mut testcase = (*state.corpus_mut().get(idx)?).borrow_mut();
             let mut log = Vec::<String>::new();
@@ -451,28 +430,18 @@ where
 
     /// Get the next mutation to apply
     fn schedule(&self, state: &mut S, _: &I) -> MutationId {
-        debug_assert!(!self.scheduled.mutations().is_empty());
-        state
-            .rand_mut()
-            .below(self.scheduled.mutations().len() as u64)
-            .into()
+        debug_assert!(MT::LEN != 0);
+        state.rand_mut().below(MT::LEN as u64).into()
     }
 
-    fn scheduled_mutate(
-        &mut self,
-        state: &mut S,
-        input: &mut I,
-        stage_idx: i32,
-    ) -> Result<MutationResult, Error> {
+    fn scheduled_mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
         let mut r = MutationResult::Skipped;
         let num = self.iterations(state, input);
         self.mutation_log.clear();
         for _ in 0..num {
             let idx = self.schedule(state, input);
             self.mutation_log.push(idx);
-            let outcome = self
-                .mutations_mut()
-                .get_and_mutate(idx, state, input, stage_idx)?;
+            let outcome = self.mutations_mut().get_and_mutate(idx, state, input)?;
             if outcome == MutationResult::Mutated {
                 r = MutationResult::Mutated;
             }
@@ -544,7 +513,7 @@ mod tests {
         rand.set_seed(5);
 
         let mut splice = SpliceMutator::new();
-        splice.mutate(&mut state, &mut input, 0).unwrap();
+        splice.mutate(&mut state, &mut input).unwrap();
 
         log::trace!("{:?}", input.bytes());
 
@@ -586,8 +555,8 @@ mod tests {
 
         let mut equal_in_a_row = 0;
 
-        for i in 0..42 {
-            havoc.mutate(&mut state, &mut input, i).unwrap();
+        for _ in 0..42 {
+            havoc.mutate(&mut state, &mut input).unwrap();
 
             // Make sure we actually mutate something, at least sometimes
             equal_in_a_row = if input == input_prior {
@@ -597,46 +566,5 @@ mod tests {
             };
             assert_ne!(equal_in_a_row, 5);
         }
-    }
-}
-
-/// `SchedulerMutator` Python bindings
-#[cfg(feature = "python")]
-#[allow(missing_docs)]
-#[allow(clippy::unnecessary_fallible_conversions)]
-pub mod pybind {
-    use pyo3::prelude::*;
-
-    use super::{havoc_mutations, Debug, HavocMutationsType, StdScheduledMutator};
-    use crate::{
-        inputs::BytesInput, mutators::pybind::PythonMutator, state::pybind::PythonStdState,
-    };
-
-    #[pyclass(unsendable, name = "StdHavocMutator")]
-    #[derive(Debug)]
-    /// Python class for StdHavocMutator
-    pub struct PythonStdHavocMutator {
-        /// Rust wrapped StdHavocMutator object
-        pub inner: StdScheduledMutator<BytesInput, HavocMutationsType, PythonStdState>,
-    }
-
-    #[pymethods]
-    impl PythonStdHavocMutator {
-        #[new]
-        fn new() -> Self {
-            Self {
-                inner: StdScheduledMutator::new(havoc_mutations()),
-            }
-        }
-
-        fn as_mutator(slf: Py<Self>) -> PythonMutator {
-            PythonMutator::new_std_havoc(slf)
-        }
-    }
-
-    /// Register the classes to the python module
-    pub fn register(_py: Python, m: &PyModule) -> PyResult<()> {
-        m.add_class::<PythonStdHavocMutator>()?;
-        Ok(())
     }
 }

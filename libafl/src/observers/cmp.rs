@@ -11,9 +11,7 @@ use hashbrown::HashMap;
 use libafl_bolts::{ownedref::OwnedRefMut, serdeany::SerdeAny, AsMutSlice, AsSlice, Named};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::{
-    executors::ExitKind, inputs::UsesInput, observers::Observer, state::HasMetadata, Error,
-};
+use crate::{executors::ExitKind, inputs::UsesInput, observers::Observer, Error, HasMetadata};
 
 /// Generic metadata trait for use in a `CmpObserver`, which adds comparisons from a `CmpObserver`
 /// primarily intended for use with `AFLppCmpValuesMetadata` or `CmpValuesMetadata`
@@ -232,12 +230,7 @@ where
         S: HasMetadata,
     {
         #[allow(clippy::option_if_let_else)] // we can't mutate state in a closure
-        let meta = if let Some(meta) = state.metadata_map_mut().get_mut::<M>() {
-            meta
-        } else {
-            state.add_metadata(M::new_metadata());
-            state.metadata_map_mut().get_mut::<M>().unwrap()
-        };
+        let meta = state.metadata_or_insert_with(|| M::new_metadata());
 
         let usable_count = self.usable_count();
         let cmp_observer_data = self.cmp_observer_data();
@@ -333,11 +326,11 @@ where
 {
     /// Creates a new [`StdCmpObserver`] with the given name and map.
     #[must_use]
-    pub fn new(name: &'static str, map: &'a mut CM, add_meta: bool) -> Self {
+    pub fn new(name: &'static str, map: OwnedRefMut<'a, CM>, add_meta: bool) -> Self {
         Self {
             name: name.to_string(),
             size: None,
-            cmp_map: OwnedRefMut::Ref(map),
+            cmp_map: map,
             add_meta,
             data: M::Data::default(),
             phantom: PhantomData,
@@ -347,11 +340,16 @@ where
     /// Creates a new [`StdCmpObserver`] with the given name, map, and auxiliary data used to
     /// populate metadata
     #[must_use]
-    pub fn with_data(name: &'static str, map: &'a mut CM, add_meta: bool, data: M::Data) -> Self {
+    pub fn with_data(
+        name: &'static str,
+        cmp_map: OwnedRefMut<'a, CM>,
+        add_meta: bool,
+        data: M::Data,
+    ) -> Self {
         Self {
             name: name.to_string(),
             size: None,
-            cmp_map: OwnedRefMut::Ref(map),
+            cmp_map,
             add_meta,
             data,
             phantom: PhantomData,
@@ -362,14 +360,14 @@ where
     #[must_use]
     pub fn with_size(
         name: &'static str,
-        map: &'a mut CM,
+        cmp_map: OwnedRefMut<'a, CM>,
         add_meta: bool,
-        size: &'a mut usize,
+        size: OwnedRefMut<'a, usize>,
     ) -> Self {
         Self {
             name: name.to_string(),
-            size: Some(OwnedRefMut::Ref(size)),
-            cmp_map: OwnedRefMut::Ref(map),
+            size: Some(size),
+            cmp_map,
             add_meta,
             data: M::Data::default(),
             phantom: PhantomData,
@@ -381,15 +379,15 @@ where
     #[must_use]
     pub fn with_size_data(
         name: &'static str,
-        map: &'a mut CM,
+        cmp_map: OwnedRefMut<'a, CM>,
         add_meta: bool,
         data: M::Data,
-        size: &'a mut usize,
+        size: OwnedRefMut<'a, usize>,
     ) -> Self {
         Self {
             name: name.to_string(),
-            size: Some(OwnedRefMut::Ref(size)),
-            cmp_map: OwnedRefMut::Ref(map),
+            size: Some(size),
+            cmp_map,
             add_meta,
             data,
             phantom: PhantomData,
@@ -463,10 +461,10 @@ struct cmp_map {
     allow(clippy::unsafe_derive_deserialize)
 )] // for SerdeAny
 pub struct AFLppCmpValuesMetadata {
-    /// The first map of AFLppCmpLogVals retrieved by running the un-mutated input
+    /// The first map of `AFLppCmpLogVals` retrieved by running the un-mutated input
     #[serde(skip)]
     pub orig_cmpvals: HashMap<usize, Vec<CmpValues>>,
-    /// The second map of AFLppCmpLogVals retrieved by runnning the mutated input
+    /// The second map of `AFLppCmpLogVals` retrieved by runnning the mutated input
     #[serde(skip)]
     pub new_cmpvals: HashMap<usize, Vec<CmpValues>>,
     /// The list of logged idx and headers retrieved by runnning the mutated input

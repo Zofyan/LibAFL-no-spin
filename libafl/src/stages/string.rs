@@ -8,10 +8,11 @@ use libafl_bolts::{impl_serdeany, Error};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    corpus::{CorpusId, HasTestcase},
+    corpus::HasTestcase,
     inputs::{BytesInput, HasBytesVec},
     stages::Stage,
-    state::{HasCorpus, HasMetadata, State, UsesState},
+    state::{HasCorpus, HasCurrentTestcase, State, UsesState},
+    HasMetadata,
 };
 
 /// Metadata which stores the list of pre-computed string-like ranges in the input
@@ -110,9 +111,8 @@ where
         _executor: &mut E,
         state: &mut Self::State,
         _manager: &mut EM,
-        corpus_idx: CorpusId,
     ) -> Result<(), Error> {
-        let mut tc = state.testcase_mut(corpus_idx)?;
+        let mut tc = state.current_testcase_mut()?;
         if tc.has_metadata::<StringIdentificationMetadata>() {
             return Ok(()); // skip recompute
         }
@@ -123,6 +123,18 @@ where
         let metadata = extract_metadata(bytes);
         tc.add_metadata(metadata);
 
+        Ok(())
+    }
+
+    #[inline]
+    fn restart_progress_should_run(&mut self, _state: &mut Self::State) -> Result<bool, Error> {
+        // Stage does not run the target. No reset helper needed.
+        Ok(true)
+    }
+
+    #[inline]
+    fn clear_restart_progress(&mut self, _state: &mut Self::State) -> Result<(), Error> {
+        // Stage does not run the target. No reset helper needed.
         Ok(())
     }
 }

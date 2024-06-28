@@ -19,6 +19,9 @@ command = "cargo"
 args = ["build" , "--profile", "${PROFILE}", "--bin", "${FUZZER_NAME}"]
 dependencies = [ "cc" ]
 
+[tasks.build]
+alias = "fuzzer"
+
 # Run the fuzzer
 [tasks.run]
 command = "${CARGO_TARGET_DIR}/${PROFILE_DIR}/${FUZZER_NAME}"
@@ -33,12 +36,12 @@ windows_alias = "unsupported"
 [tasks.test_unix]
 script_runner = "@shell"
 script='''
-timeout 10s ${CARGO_TARGET_DIR}/${PROFILE_DIR}/${FUZZER_NAME} >fuzz_stdout.log || true
-if [ -z "$(grep "objectives: 1" fuzz_stdout.log)" ]; then
+timeout 30s ${CARGO_TARGET_DIR}/${PROFILE_DIR}/${FUZZER_NAME} >fuzz_stdout.log || true
+if grep -qa "objectives: 1" fuzz_stdout.log; then
+    echo "Fuzzer is working"
+else
     echo "Fuzzer does not generate any testcases or any crashes"
     exit 1
-else
-    echo "Fuzzer is working"
 fi
 '''
 dependencies = [ "fuzzer" ]

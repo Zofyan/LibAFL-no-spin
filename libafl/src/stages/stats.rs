@@ -9,12 +9,12 @@ use libafl_bolts::current_time;
 use serde_json::json;
 
 use crate::{
-    corpus::{Corpus, CorpusId},
+    corpus::{Corpus, HasCurrentCorpusIdx},
     events::EventFirer,
     schedulers::minimizer::IsFavoredMetadata,
     stages::Stage,
-    state::{HasCorpus, HasImported, HasMetadata, UsesState},
-    Error,
+    state::{HasCorpus, HasImported, UsesState},
+    Error, HasMetadata,
 };
 #[cfg(feature = "std")]
 use crate::{
@@ -68,8 +68,13 @@ where
         _executor: &mut E,
         state: &mut E::State,
         _manager: &mut EM,
-        corpus_idx: CorpusId,
     ) -> Result<(), Error> {
+        let Some(corpus_idx) = state.current_corpus_idx()? else {
+            return Err(Error::illegal_state(
+                "state is not currently processing a corpus index",
+            ));
+        };
+
         // Report your stats every `STATS_REPORT_INTERVAL`
         // compute pending, pending_favored, imported, own_finds
         {
@@ -124,6 +129,18 @@ where
             self.last_report_time = cur;
         }
 
+        Ok(())
+    }
+
+    #[inline]
+    fn restart_progress_should_run(&mut self, _state: &mut Self::State) -> Result<bool, Error> {
+        // Not running the target so we wont't crash/timeout and, hence, don't need to restore anything
+        Ok(true)
+    }
+
+    #[inline]
+    fn clear_restart_progress(&mut self, _state: &mut Self::State) -> Result<(), Error> {
+        // Not running the target so we wont't crash/timeout and, hence, don't need to restore anything
         Ok(())
     }
 }

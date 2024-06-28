@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 pub use strum_macros::EnumIter;
 pub use syscall_numbers::mips::*;
 
-use crate::{sync_backdoor::SyncBackdoorArgs, CallingConvention};
+use crate::{sync_backdoor::BackdoorArgs, CallingConvention};
 
 /// Registers for the MIPS instruction set.
 #[derive(IntoPrimitive, TryFromPrimitive, Debug, Clone, Copy, EnumIter)]
@@ -48,19 +48,19 @@ pub enum Regs {
     Pc = 37,
 }
 
-static SYNC_BACKDOOR_ARCH_REGS: OnceLock<EnumMap<SyncBackdoorArgs, Regs>> = OnceLock::new();
+static BACKDOOR_ARCH_REGS: OnceLock<EnumMap<BackdoorArgs, Regs>> = OnceLock::new();
 
-pub fn get_sync_backdoor_arch_regs() -> &'static EnumMap<SyncBackdoorArgs, Regs> {
-    SYNC_BACKDOOR_ARCH_REGS.get_or_init(|| {
+pub fn get_backdoor_arch_regs() -> &'static EnumMap<BackdoorArgs, Regs> {
+    BACKDOOR_ARCH_REGS.get_or_init(|| {
         enum_map! {
-            SyncBackdoorArgs::Ret  => Regs::V0,
-            SyncBackdoorArgs::Cmd  => Regs::V0,
-            SyncBackdoorArgs::Arg1 => Regs::A0,
-            SyncBackdoorArgs::Arg2 => Regs::A1,
-            SyncBackdoorArgs::Arg3 => Regs::A2,
-            SyncBackdoorArgs::Arg4 => Regs::A3,
-            SyncBackdoorArgs::Arg5 => Regs::T0,
-            SyncBackdoorArgs::Arg6 => Regs::T1,
+            BackdoorArgs::Ret  => Regs::V0,
+            BackdoorArgs::Cmd  => Regs::V0,
+            BackdoorArgs::Arg1 => Regs::A0,
+            BackdoorArgs::Arg2 => Regs::A1,
+            BackdoorArgs::Arg3 => Regs::A2,
+            BackdoorArgs::Arg4 => Regs::A3,
+            BackdoorArgs::Arg5 => Regs::T0,
+            BackdoorArgs::Arg6 => Regs::T1,
         }
     })
 }
@@ -101,7 +101,7 @@ impl crate::ArchExtras for crate::CPU {
         self.write_reg(Regs::Ra, val)
     }
 
-    fn read_function_argument<T>(&self, conv: CallingConvention, idx: i32) -> Result<T, String>
+    fn read_function_argument<T>(&self, conv: CallingConvention, idx: u8) -> Result<T, String>
     where
         T: From<GuestReg>,
     {
@@ -109,11 +109,16 @@ impl crate::ArchExtras for crate::CPU {
             return Err(format!("Unsupported calling convention: {conv:#?}"));
         }
 
-        match idx {
-            0 => self.read_reg(Regs::A0),
-            1 => self.read_reg(Regs::A1),
-            _ => Err(format!("Unsupported argument: {idx:}")),
-        }
+        let reg_id = match idx {
+            0 => Regs::A0,
+            1 => Regs::A1,
+            2 => Regs::A2,
+            3 => Regs::A3,
+            // 4.. would be on the stack, let's not do this for now
+            r => return Err(format!("Unsupported argument: {r:}")),
+        };
+
+        self.read_reg(reg_id)
     }
 
     fn write_function_argument<T>(

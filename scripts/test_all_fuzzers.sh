@@ -4,32 +4,18 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 cd "$SCRIPT_DIR/.." || exit 1
 # TODO: This should be rewritten in rust, a Makefile, or some platform-independent language
 
+
 if [[ -z "${RUN_ON_CI}" ]]; then
-    fuzzers=$(find ./fuzzers -mindepth 1 -maxdepth 1 -type d)
-    backtrace_fuzzers=$(find ./fuzzers/backtrace_baby_fuzzers -mindepth 1 -maxdepth 1 -type d)
+    fuzzer_to_test="$1"
 else
-    cargo build -p build_and_test_fuzzers
-    fuzzers=$(cargo run -p build_and_test_fuzzers -- "remotes/origin/main" "HEAD^")
-    backtrace_fuzzers=""
+    fuzzer_to_test="$1"
     export PROFILE=dev
     export PROFILE_DIR=debug
 fi
 
-
-if [[ -z "${RUN_ON_CI}" ]]; then
-    :
-else
-    if [[ -z "${RUN_QEMU_FUZZER}" ]]; then
-        fuzzers=$(echo "$fuzzers" | tr ' ' '\n' | grep -v "qemu")
-        backtrace_fuzzers=$(echo "$backtrace_fuzzers" | tr ' ' '\n' | grep "qemu")
-    else
-        fuzzers=$(echo "$fuzzers" | tr ' ' '\n' | grep  "qemu")
-        backtrace_fuzzers=$(echo "$backtrace_fuzzers" | tr ' ' '\n' | grep -v "qemu")
-    fi
-fi
-
 libafl=$(pwd)
 
+echo "Testing" "$fuzzer_to_test"
 # build with a shared target dir for all fuzzers. this should speed up
 # compilation a bit, and allows for easier artifact management (caching and
 # cargo clean).
@@ -52,7 +38,7 @@ do
 done
 
 # shellcheck disable=SC2116
-for fuzzer in $(echo "$fuzzers" "$backtrace_fuzzers");
+for fuzzer in $(echo "$fuzzer_to_test");
 do
     # skip nyx test on non-linux platforms
     if [[ $fuzzer == *"nyx_"* ]] && [[ $(uname -s) != "Linux" ]]; then

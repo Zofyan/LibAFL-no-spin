@@ -5,7 +5,7 @@ use std::{fs, net::SocketAddr, path::PathBuf, time::Duration};
 use libafl::{
     corpus::{CachedOnDiskCorpus, Corpus, OnDiskCorpus},
     events::{launcher::Launcher, EventConfig, EventRestarter, LlmpRestartingEventManager},
-    executors::{forkserver::ForkserverExecutorBuilder, TimeoutForkserverExecutor},
+    executors::forkserver::ForkserverExecutorBuilder,
     feedback_or, feedback_or_fast,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback, TimeoutFeedback},
     fuzzer::{Fuzzer, StdFuzzer},
@@ -15,11 +15,11 @@ use libafl::{
         scheduled::{havoc_mutations, tokens_mutations, StdScheduledMutator},
         token_mutations::Tokens,
     },
-    observers::{HitcountsMapObserver, StdMapObserver, TimeObserver},
+    observers::{CanTrack, HitcountsMapObserver, StdMapObserver, TimeObserver},
     schedulers::{IndexesLenTimeMinimizerScheduler, QueueScheduler},
     stages::StdMutationalStage,
-    state::{HasCorpus, HasMetadata, StdState},
-    Error,
+    state::{HasCorpus, StdState},
+    Error, HasMetadata,
 };
 use libafl_bolts::{
     core_affinity::Cores,
@@ -32,9 +32,6 @@ use libafl_bolts::{
 use typed_builder::TypedBuilder;
 
 use crate::{CORPUS_CACHE_SIZE, DEFAULT_TIMEOUT_SECS};
-
-/// The default coverage map size to use for forkserver targets
-pub const DEFAULT_MAP_SIZE: usize = 65536;
 
 /// Creates a Forkserver-based fuzzer.
 #[derive(Debug, TypedBuilder)]
@@ -118,7 +115,7 @@ impl<'a> ForkserverBytesCoverageSugar<'a> {
         let monitor = MultiMonitor::new(|s| log::info!("{s}"));
 
         let mut run_client = |state: Option<_>,
-                              mut mgr: LlmpRestartingEventManager<_, _>,
+                              mut mgr: LlmpRestartingEventManager<_, _, _>,
                               _core_id| {
             // Coverage map shared between target and fuzzer
             let mut shmem = shmem_provider_client.new_shmem(MAP_SIZE).unwrap();
@@ -129,8 +126,10 @@ impl<'a> ForkserverBytesCoverageSugar<'a> {
             std::env::set_var("AFL_MAP_SIZE", format!("{MAP_SIZE}"));
 
             // Create an observation channel using the coverage map
-            let edges_observer =
-                unsafe { HitcountsMapObserver::new(StdMapObserver::new("shared_mem", shmem_map)) };
+            let edges_observer = unsafe {
+                HitcountsMapObserver::new(StdMapObserver::new("shared_mem", shmem_map))
+                    .track_indices()
+            };
 
             // Create an observation channel to keep track of the execution time
             let time_observer = TimeObserver::new("time");
@@ -139,7 +138,7 @@ impl<'a> ForkserverBytesCoverageSugar<'a> {
             // This one is composed by two Feedbacks in OR
             let mut feedback = feedback_or!(
                 // New maximization map feedback linked to the edges observer and the feedback state
-                MaxMapFeedback::tracking(&edges_observer, true, false),
+                MaxMapFeedback::new(&edges_observer),
                 // Time feedback, this one does not need a feedback state
                 TimeFeedback::with_observer(&time_observer)
             );
@@ -167,7 +166,8 @@ impl<'a> ForkserverBytesCoverageSugar<'a> {
             let mut tokens = Tokens::new();
 
             // A minimization+queue policy to get testcasess from the corpus
-            let scheduler = IndexesLenTimeMinimizerScheduler::new(QueueScheduler::new());
+            let scheduler =
+                IndexesLenTimeMinimizerScheduler::new(&edges_observer, QueueScheduler::new());
 
             // A fuzzer with feedbacks and a corpus scheduler
             let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
@@ -179,6 +179,7 @@ impl<'a> ForkserverBytesCoverageSugar<'a> {
                     .is_persistent(true)
                     .autotokens(&mut tokens)
                     .coverage_map_size(MAP_SIZE)
+                    .timeout(timeout)
                     .debug_child(self.debug_output)
                     .shmem_provider(&mut shmem_provider_client)
                     .build_dynamic_map(edges_observer, tuple_list!(time_observer))
@@ -189,10 +190,12 @@ impl<'a> ForkserverBytesCoverageSugar<'a> {
                     .is_persistent(true)
                     .autotokens(&mut tokens)
                     .coverage_map_size(MAP_SIZE)
+                    .timeout(timeout)
                     .debug_child(self.debug_output)
                     .build_dynamic_map(edges_observer, tuple_list!(time_observer))
             };
 
+            let mut executor = forkserver.unwrap();
             if let Some(tokens_file) = &self.tokens_file {
                 // if a token file is provided, load it into our set of tokens
                 tokens.add_from_file(tokens_file)?;
@@ -202,13 +205,6 @@ impl<'a> ForkserverBytesCoverageSugar<'a> {
                 // add any known tokens to the state
                 state.add_metadata(tokens);
             }
-
-            // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
-            let mut executor = TimeoutForkserverExecutor::new(
-                forkserver.expect("Failed to create the executor."),
-                timeout,
-            )
-            .expect("Failed to create the executor.");
 
             // In case the corpus is empty (on first run), reset
             if state.must_load_initial_inputs() {

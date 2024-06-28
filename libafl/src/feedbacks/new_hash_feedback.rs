@@ -13,8 +13,8 @@ use crate::{
     feedbacks::{Feedback, HasObserverName},
     inputs::UsesInput,
     observers::{ObserverWithHashField, ObserversTuple},
-    state::{HasNamedMetadata, State},
-    Error,
+    state::State,
+    Error, HasNamedMetadata,
 };
 
 /// The prefix of the metadata names
@@ -92,8 +92,8 @@ where
 {
     fn init_state(&mut self, state: &mut S) -> Result<(), Error> {
         state.add_named_metadata(
-            NewHashFeedbackMetadata::with_capacity(self.capacity),
             &self.name,
+            NewHashFeedbackMetadata::with_capacity(self.capacity),
         );
         Ok(())
     }

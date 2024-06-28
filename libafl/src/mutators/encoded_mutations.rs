@@ -15,7 +15,7 @@ use crate::{
         mutations::{buffer_copy, buffer_self_copy, ARITH_MAX},
         MutationResult, Mutator, Named,
     },
-    random_corpus_id,
+    random_corpus_id_with_disabled,
     state::{HasCorpus, HasMaxSize, HasRand},
     Error,
 };
@@ -25,12 +25,7 @@ use crate::{
 pub struct EncodedRandMutator;
 
 impl<S: HasRand> Mutator<EncodedInput, S> for EncodedRandMutator {
-    fn mutate(
-        &mut self,
-        state: &mut S,
-        input: &mut EncodedInput,
-        _stage_idx: i32,
-    ) -> Result<MutationResult, Error> {
+    fn mutate(&mut self, state: &mut S, input: &mut EncodedInput) -> Result<MutationResult, Error> {
         if input.codes().is_empty() {
             Ok(MutationResult::Skipped)
         } else {
@@ -60,12 +55,7 @@ impl EncodedRandMutator {
 pub struct EncodedIncMutator;
 
 impl<S: HasRand> Mutator<EncodedInput, S> for EncodedIncMutator {
-    fn mutate(
-        &mut self,
-        state: &mut S,
-        input: &mut EncodedInput,
-        _stage_idx: i32,
-    ) -> Result<MutationResult, Error> {
+    fn mutate(&mut self, state: &mut S, input: &mut EncodedInput) -> Result<MutationResult, Error> {
         if input.codes().is_empty() {
             Ok(MutationResult::Skipped)
         } else {
@@ -95,12 +85,7 @@ impl EncodedIncMutator {
 pub struct EncodedDecMutator;
 
 impl<S: HasRand> Mutator<EncodedInput, S> for EncodedDecMutator {
-    fn mutate(
-        &mut self,
-        state: &mut S,
-        input: &mut EncodedInput,
-        _stage_idx: i32,
-    ) -> Result<MutationResult, Error> {
+    fn mutate(&mut self, state: &mut S, input: &mut EncodedInput) -> Result<MutationResult, Error> {
         if input.codes().is_empty() {
             Ok(MutationResult::Skipped)
         } else {
@@ -130,12 +115,7 @@ impl EncodedDecMutator {
 pub struct EncodedAddMutator;
 
 impl<S: HasRand> Mutator<EncodedInput, S> for EncodedAddMutator {
-    fn mutate(
-        &mut self,
-        state: &mut S,
-        input: &mut EncodedInput,
-        _stage_idx: i32,
-    ) -> Result<MutationResult, Error> {
+    fn mutate(&mut self, state: &mut S, input: &mut EncodedInput) -> Result<MutationResult, Error> {
         if input.codes().is_empty() {
             Ok(MutationResult::Skipped)
         } else {
@@ -169,12 +149,7 @@ impl EncodedAddMutator {
 pub struct EncodedDeleteMutator;
 
 impl<S: HasRand> Mutator<EncodedInput, S> for EncodedDeleteMutator {
-    fn mutate(
-        &mut self,
-        state: &mut S,
-        input: &mut EncodedInput,
-        _stage_idx: i32,
-    ) -> Result<MutationResult, Error> {
+    fn mutate(&mut self, state: &mut S, input: &mut EncodedInput) -> Result<MutationResult, Error> {
         let size = input.codes().len();
         if size <= 2 {
             return Ok(MutationResult::Skipped);
@@ -212,12 +187,7 @@ impl<S> Mutator<EncodedInput, S> for EncodedInsertCopyMutator
 where
     S: HasRand + HasMaxSize,
 {
-    fn mutate(
-        &mut self,
-        state: &mut S,
-        input: &mut EncodedInput,
-        _stage_idx: i32,
-    ) -> Result<MutationResult, Error> {
+    fn mutate(&mut self, state: &mut S, input: &mut EncodedInput) -> Result<MutationResult, Error> {
         let max_size = state.max_size();
         let size = input.codes().len();
         if size == 0 {
@@ -272,12 +242,7 @@ impl EncodedInsertCopyMutator {
 pub struct EncodedCopyMutator;
 
 impl<S: HasRand> Mutator<EncodedInput, S> for EncodedCopyMutator {
-    fn mutate(
-        &mut self,
-        state: &mut S,
-        input: &mut EncodedInput,
-        _stage_idx: i32,
-    ) -> Result<MutationResult, Error> {
+    fn mutate(&mut self, state: &mut S, input: &mut EncodedInput) -> Result<MutationResult, Error> {
         let size = input.codes().len();
         if size <= 1 {
             return Ok(MutationResult::Skipped);
@@ -317,16 +282,11 @@ impl<S> Mutator<S::Input, S> for EncodedCrossoverInsertMutator
 where
     S: UsesInput<Input = EncodedInput> + HasRand + HasCorpus + HasMaxSize,
 {
-    fn mutate(
-        &mut self,
-        state: &mut S,
-        input: &mut EncodedInput,
-        _stage_idx: i32,
-    ) -> Result<MutationResult, Error> {
+    fn mutate(&mut self, state: &mut S, input: &mut EncodedInput) -> Result<MutationResult, Error> {
         let size = input.codes().len();
 
         // We don't want to use the testcase we're already using for splicing
-        let idx = random_corpus_id!(state.corpus(), state.rand_mut());
+        let idx = random_corpus_id_with_disabled!(state.corpus(), state.rand_mut());
         if let Some(cur) = state.corpus().current() {
             if idx == *cur {
                 return Ok(MutationResult::Skipped);
@@ -334,7 +294,7 @@ where
         }
 
         let other_size = {
-            let mut other_testcase = state.corpus().get(idx)?.borrow_mut();
+            let mut other_testcase = state.corpus().get_from_all(idx)?.borrow_mut();
             other_testcase.load_input(state.corpus())?.codes().len()
         };
 
@@ -355,7 +315,7 @@ where
             }
         }
 
-        let other_testcase = state.corpus().get(idx)?.borrow_mut();
+        let other_testcase = state.corpus().get_from_all(idx)?.borrow_mut();
         // no need to `load_input` again -  we did that above already.
         let other = other_testcase.input().as_ref().unwrap();
 
@@ -391,19 +351,14 @@ impl<S> Mutator<S::Input, S> for EncodedCrossoverReplaceMutator
 where
     S: UsesInput<Input = EncodedInput> + HasRand + HasCorpus,
 {
-    fn mutate(
-        &mut self,
-        state: &mut S,
-        input: &mut EncodedInput,
-        _stage_idx: i32,
-    ) -> Result<MutationResult, Error> {
+    fn mutate(&mut self, state: &mut S, input: &mut EncodedInput) -> Result<MutationResult, Error> {
         let size = input.codes().len();
         if size == 0 {
             return Ok(MutationResult::Skipped);
         }
 
         // We don't want to use the testcase we're already using for splicing
-        let idx = random_corpus_id!(state.corpus(), state.rand_mut());
+        let idx = random_corpus_id_with_disabled!(state.corpus(), state.rand_mut());
         if let Some(cur) = state.corpus().current() {
             if idx == *cur {
                 return Ok(MutationResult::Skipped);
@@ -412,7 +367,7 @@ where
 
         let other_size = {
             // new scope to make the borrow checker happy
-            let mut other_testcase = state.corpus().get(idx)?.borrow_mut();
+            let mut other_testcase = state.corpus().get_from_all(idx)?.borrow_mut();
             other_testcase.load_input(state.corpus())?.codes().len()
         };
 
@@ -424,7 +379,7 @@ where
         let len = state.rand_mut().below(min(other_size - from, size) as u64) as usize;
         let to = state.rand_mut().below((size - len) as u64) as usize;
 
-        let other_testcase = state.corpus().get(idx)?.borrow_mut();
+        let other_testcase = state.corpus().get_from_all(idx)?.borrow_mut();
         // no need to load the input again, it'll already be present at this point.
         let other = other_testcase.input().as_ref().unwrap();
 

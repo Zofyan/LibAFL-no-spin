@@ -105,6 +105,7 @@ mod harness_wrap {
     #![allow(improper_ctypes)]
     #![allow(clippy::unreadable_literal)]
     #![allow(missing_docs)]
+    #![allow(unused_qualifications)]
     include!(concat!(env!("OUT_DIR"), "/harness_wrap.rs"));
 }
 
@@ -114,8 +115,6 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 #[cfg(feature = "mimalloc")]
 static GLOBAL: MiMalloc = MiMalloc;
-
-static mut BACKTRACE: Option<u64> = None;
 
 #[allow(clippy::struct_excessive_bools)]
 struct CustomMutationStatus {
@@ -158,7 +157,7 @@ macro_rules! fuzz_with {
         };
         use libafl::{
             corpus::Corpus,
-            executors::{ExitKind, InProcessExecutor, TimeoutExecutor},
+            executors::{ExitKind, InProcessExecutor},
             feedback_and_fast, feedback_not, feedback_or, feedback_or_fast,
             feedbacks::{ConstFeedback, CrashFeedback, MaxMapFeedback, NewHashFeedback, TimeFeedback, TimeoutFeedback},
             generators::RandBytesGenerator,
@@ -169,7 +168,7 @@ macro_rules! fuzz_with {
                 I2SRandReplace, StdScheduledMutator, StringCategoryRandMutator, StringSubcategoryRandMutator,
                 StringCategoryTokenReplaceMutator, StringSubcategoryTokenReplaceMutator, Tokens, tokens_mutations
             },
-            observers::{stacktrace::BacktraceObserver, TimeObserver},
+            observers::{stacktrace::BacktraceObserver, TimeObserver, CanTrack},
             schedulers::{
                 IndexesLenTimeMinimizerScheduler, powersched::PowerSchedule, PowerQueueScheduler,
             },
@@ -184,11 +183,13 @@ macro_rules! fuzz_with {
         use rand::{thread_rng, RngCore};
         use std::{env::temp_dir, fs::create_dir, path::PathBuf};
 
-        use crate::{BACKTRACE, CustomMutationStatus};
-        use crate::corpus::{ArtifactCorpus, LibfuzzerCorpus};
-        use crate::feedbacks::{LibfuzzerCrashCauseFeedback, LibfuzzerKeepFeedback, ShrinkMapFeedback};
-        use crate::misc::should_use_grimoire;
-        use crate::observers::{MappedEdgeMapObserver, SizeValueObserver};
+        use crate::{
+            CustomMutationStatus,
+            corpus::{ArtifactCorpus, LibfuzzerCorpus},
+            feedbacks::{LibfuzzerCrashCauseFeedback, LibfuzzerKeepFeedback, ShrinkMapFeedback},
+            misc::should_use_grimoire,
+            observers::{MappedEdgeMapObserver, SizeValueObserver},
+        };
 
         let edge_maker = &$edge_maker;
 
@@ -197,7 +198,7 @@ macro_rules! fuzz_with {
             let grimoire_metadata = should_use_grimoire(&mut state, &$options, &mutator_status)?;
             let grimoire = grimoire_metadata.should();
 
-            let edges_observer = edge_maker();
+            let edges_observer = edge_maker().track_indices().track_novelties();
             let size_edges_observer = MappedEdgeMapObserver::new(edge_maker(), SizeValueObserver::default());
 
             let keep_observer = LibfuzzerKeepFeedback::new();
@@ -213,19 +214,18 @@ macro_rules! fuzz_with {
             let cmplog_observer = CmpLogObserver::new("cmplog", true);
 
             // Create a stacktrace observer
-            let backtrace_observer = BacktraceObserver::new(
+            let backtrace_observer = BacktraceObserver::owned(
                 "BacktraceObserver",
-                unsafe { &mut BACKTRACE },
                 if $options.forks().is_some() || $options.tui() { libafl::observers::HarnessType::Child } else { libafl::observers::HarnessType::InProcess }
             );
 
             // New maximization map feedback linked to the edges observer
-            let map_feedback = MaxMapFeedback::tracking(&edges_observer, true, true);
-            let shrinking_map_feedback = ShrinkMapFeedback::tracking(&size_edges_observer, false, false);
+            let map_feedback = MaxMapFeedback::new(&edges_observer);
+            let shrinking_map_feedback = ShrinkMapFeedback::new(&size_edges_observer);
 
             // Set up a generalization stage for grimoire
             let generalization = GeneralizationStage::new(&edges_observer);
-            let generalization = IfStage::new(|_, _, _, _, _| Ok(grimoire.into()), tuple_list!(generalization));
+            let generalization = IfStage::new(|_, _, _, _| Ok(grimoire.into()), tuple_list!(generalization));
 
             let calibration = CalibrationStage::new(&map_feedback);
 
@@ -321,7 +321,7 @@ macro_rules! fuzz_with {
             let string_replace_power = StdMutationalStage::transforming(string_replace_mutator);
 
             let string_analysis = StringIdentificationStage::new();
-            let string_analysis = IfStage::new(|_, _, _, _, _| Ok((unicode_used && mutator_status.std_mutational).into()), tuple_list!(string_analysis, string_power, string_replace_power));
+            let string_analysis = IfStage::new(|_, _, _, _| Ok((unicode_used && mutator_status.std_mutational).into()), tuple_list!(string_analysis, string_power, string_replace_power));
 
             // Attempt to use tokens from libfuzzer dicts
             if !state.has_metadata::<Tokens>() {
@@ -343,19 +343,19 @@ macro_rules! fuzz_with {
             // Setup a randomic Input2State stage, conditionally within a custom mutator
             let i2s =
                 StdMutationalStage::new(StdScheduledMutator::new(tuple_list!(I2SRandReplace::new())));
-            let i2s = IfStage::new(|_, _, _, _, _| Ok((!mutator_status.custom_mutation).into()), (i2s, ()));
+            let i2s = IfStage::new(|_, _, _, _| Ok((!mutator_status.custom_mutation).into()), (i2s, ()));
             let cm_i2s = StdMutationalStage::new(unsafe {
                 LLVMCustomMutator::mutate_unchecked(StdScheduledMutator::new(tuple_list!(
                     I2SRandReplace::new()
                 )))
             });
-            let cm_i2s = IfStage::new(|_, _, _, _, _| Ok(mutator_status.custom_mutation.into()), (cm_i2s, ()));
+            let cm_i2s = IfStage::new(|_, _, _, _| Ok(mutator_status.custom_mutation.into()), (cm_i2s, ()));
 
             // TODO configure with mutation stacking options from libfuzzer
             let std_mutator = StdScheduledMutator::new(havoc_mutations().merge(tokens_mutations()));
 
             let std_power = StdPowerMutationalStage::new(std_mutator);
-            let std_power = IfStage::new(|_, _, _, _, _| Ok(mutator_status.std_mutational.into()), (std_power, ()));
+            let std_power = IfStage::new(|_, _, _, _| Ok(mutator_status.std_mutational.into()), (std_power, ()));
 
             // for custom mutator and crossover, each have access to the LLVMFuzzerMutate -- but it appears
             // that this method doesn't normally offer stacked mutations where one may expect them
@@ -376,10 +376,10 @@ macro_rules! fuzz_with {
             let std_mutator_no_mutate = StdScheduledMutator::with_max_stack_pow(havoc_crossover(), 3);
 
             let cm_power = StdPowerMutationalStage::new(custom_mutator);
-            let cm_power = IfStage::new(|_, _, _, _, _| Ok(mutator_status.custom_mutation.into()), (cm_power, ()));
+            let cm_power = IfStage::new(|_, _, _, _| Ok(mutator_status.custom_mutation.into()), (cm_power, ()));
             let cm_std_power = StdMutationalStage::new(std_mutator_no_mutate);
             let cm_std_power =
-                IfStage::new(|_, _, _, _, _| Ok(mutator_status.std_no_mutate.into()), (cm_std_power, ()));
+                IfStage::new(|_, _, _, _| Ok(mutator_status.std_no_mutate.into()), (cm_std_power, ()));
 
             // a custom crossover is defined
             // while the scenario that a custom crossover is defined without a custom mutator is unlikely
@@ -393,10 +393,10 @@ macro_rules! fuzz_with {
             let std_mutator_no_crossover = StdScheduledMutator::new(havoc_mutations_no_crossover().merge(tokens_mutations()));
 
             let cc_power = StdMutationalStage::new(custom_crossover);
-            let cc_power = IfStage::new(|_, _, _, _, _| Ok(mutator_status.custom_crossover.into()), (cc_power, ()));
+            let cc_power = IfStage::new(|_, _, _, _| Ok(mutator_status.custom_crossover.into()), (cc_power, ()));
             let cc_std_power = StdPowerMutationalStage::new(std_mutator_no_crossover);
             let cc_std_power =
-                IfStage::new(|_, _, _, _, _| Ok(mutator_status.std_no_crossover.into()), (cc_std_power, ()));
+                IfStage::new(|_, _, _, _| Ok(mutator_status.std_no_crossover.into()), (cc_std_power, ()));
 
             let grimoire_mutator = StdScheduledMutator::with_max_stack_pow(
                 tuple_list!(
@@ -409,10 +409,10 @@ macro_rules! fuzz_with {
                 ),
                 3,
             );
-            let grimoire = IfStage::new(|_, _, _, _, _| Ok(grimoire.into()), (StdMutationalStage::transforming(grimoire_mutator), ()));
+            let grimoire = IfStage::new(|_, _, _, _| Ok(grimoire.into()), (StdMutationalStage::transforming(grimoire_mutator), ()));
 
             // A minimization+queue policy to get testcasess from the corpus
-            let scheduler = IndexesLenTimeMinimizerScheduler::new(PowerQueueScheduler::new(&mut state, &edges_observer, PowerSchedule::FAST));
+            let scheduler = IndexesLenTimeMinimizerScheduler::new(&edges_observer, PowerQueueScheduler::new(&mut state, &edges_observer, PowerSchedule::FAST));
 
             // A fuzzer with feedbacks and a corpus scheduler
             let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
@@ -435,16 +435,14 @@ macro_rules! fuzz_with {
             let mut tracing_harness = harness;
 
             // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
-            let mut executor = TimeoutExecutor::new(
-                InProcessExecutor::new(
+            let mut executor = InProcessExecutor::with_timeout(
                     &mut harness,
                     tuple_list!(edges_observer, size_edges_observer, time_observer, backtrace_observer, oom_observer),
                     &mut fuzzer,
                     &mut state,
                     &mut mgr,
-                )?,
-                $options.timeout(),
-            );
+                    $options.timeout(),
+                )?;
 
             // In case the corpus is empty (on first run) or crashed while loading, reset
             if state.must_load_initial_inputs() {
@@ -480,7 +478,7 @@ macro_rules! fuzz_with {
 
 
             // Setup a tracing stage in which we log comparisons
-            let tracing = IfStage::new(|_, _, _, _, _| Ok(!$options.skip_tracing()), (TracingStage::new(InProcessExecutor::new(
+            let tracing = IfStage::new(|_, _, _, _| Ok(!$options.skip_tracing()), (TracingStage::new(InProcessExecutor::new(
                 &mut tracing_harness,
                 tuple_list!(cmplog_observer),
                 &mut fuzzer,

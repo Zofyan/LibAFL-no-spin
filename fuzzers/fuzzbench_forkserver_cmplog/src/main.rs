@@ -9,9 +9,9 @@ use std::{
 
 use clap::{Arg, ArgAction, Command};
 use libafl::{
-    corpus::{Corpus, CorpusId, InMemoryOnDiskCorpus, OnDiskCorpus},
+    corpus::{Corpus, InMemoryOnDiskCorpus, OnDiskCorpus},
     events::SimpleEventManager,
-    executors::forkserver::{ForkserverExecutor, TimeoutForkserverExecutor},
+    executors::forkserver::ForkserverExecutor,
     feedback_or,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback},
     fuzzer::{Fuzzer, StdFuzzer},
@@ -21,7 +21,7 @@ use libafl::{
         scheduled::havoc_mutations, token_mutations::AFLppRedQueen, tokens_mutations,
         StdMOptMutator, Tokens,
     },
-    observers::{HitcountsMapObserver, StdMapObserver, TimeObserver},
+    observers::{CanTrack, HitcountsMapObserver, StdMapObserver, TimeObserver},
     schedulers::{
         powersched::PowerSchedule, IndexesLenTimeMinimizerScheduler, StdWeightedScheduler,
     },
@@ -29,11 +29,12 @@ use libafl::{
         calibrate::CalibrationStage, mutational::MultiMutationalStage,
         power::StdPowerMutationalStage, ColorizationStage, IfStage,
     },
-    state::{HasCorpus, HasMetadata, StdState},
-    Error,
+    state::{HasCorpus, HasCurrentTestcase, StdState},
+    Error, HasMetadata,
 };
 use libafl_bolts::{
     current_nanos, current_time,
+    ownedref::OwnedRefMut,
     rands::StdRand,
     shmem::{ShMem, ShMemProvider, UnixShMemProvider},
     tuples::{tuple_list, Merge},
@@ -207,6 +208,7 @@ pub fn main() {
 }
 
 /// The actual fuzzer
+#[allow(clippy::too_many_arguments)]
 fn fuzz(
     corpus_dir: PathBuf,
     objective_dir: PathBuf,
@@ -249,13 +251,14 @@ fn fuzz(
     std::env::set_var("AFL_MAP_SIZE", format!("{MAP_SIZE}"));
 
     // Create an observation channel using the hitcounts map of AFL++
-    let edges_observer =
-        unsafe { HitcountsMapObserver::new(StdMapObserver::new("shared_mem", shmem_buf)) };
+    let edges_observer = unsafe {
+        HitcountsMapObserver::new(StdMapObserver::new("shared_mem", shmem_buf)).track_indices()
+    };
 
     // Create an observation channel to keep track of the execution time
     let time_observer = TimeObserver::new("time");
 
-    let map_feedback = MaxMapFeedback::tracking(&edges_observer, true, false);
+    let map_feedback = MaxMapFeedback::new(&edges_observer);
 
     let calibration = CalibrationStage::new(&map_feedback);
 
@@ -301,30 +304,32 @@ fn fuzz(
     let power = StdPowerMutationalStage::new(mutator);
 
     // A minimization+queue policy to get testcasess from the corpus
-    let scheduler = IndexesLenTimeMinimizerScheduler::new(StdWeightedScheduler::with_schedule(
-        &mut state,
+    let scheduler = IndexesLenTimeMinimizerScheduler::new(
         &edges_observer,
-        Some(PowerSchedule::EXPLORE),
-    ));
+        StdWeightedScheduler::with_schedule(
+            &mut state,
+            &edges_observer,
+            Some(PowerSchedule::EXPLORE),
+        ),
+    );
 
     // A fuzzer with feedbacks and a corpus scheduler
     let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
 
     let colorization = ColorizationStage::new(&edges_observer);
     let mut tokens = Tokens::new();
-    let forkserver = ForkserverExecutor::builder()
+    let mut executor = ForkserverExecutor::builder()
         .program(executable)
         .debug_child(debug_child)
         .shmem_provider(&mut shmem_provider)
         .autotokens(&mut tokens)
         .parse_afl_cmdline(arguments)
         .coverage_map_size(MAP_SIZE)
+        .timeout(timeout)
+        .kill_signal(signal)
         .is_persistent(true)
         .build_dynamic_map(edges_observer, tuple_list!(time_observer))
         .unwrap();
-
-    let mut executor = TimeoutForkserverExecutor::with_signal(forkserver, timeout, signal)
-        .expect("Failed to create the executor.");
 
     // Read tokens
     if let Some(tokenfile) = tokenfile {
@@ -344,27 +349,23 @@ fn fuzz(
 
     if let Some(exec) = &cmplog_exec {
         // The cmplog map shared between observer and executor
-        let mut cmplog_shmem = shmem_provider
-            .new_shmem(core::mem::size_of::<AFLppCmpLogMap>())
-            .unwrap();
+        let mut cmplog_shmem = shmem_provider.uninit_on_shmem::<AFLppCmpLogMap>().unwrap();
         // let the forkserver know the shmid
         cmplog_shmem.write_to_env("__AFL_CMPLOG_SHM_ID").unwrap();
-        let cmpmap = unsafe { cmplog_shmem.as_object_mut::<AFLppCmpLogMap>() };
+        let cmpmap = unsafe { OwnedRefMut::from_shmem(&mut cmplog_shmem) };
 
         let cmplog_observer = AFLppCmpLogObserver::new("cmplog", cmpmap, true);
 
-        let cmplog_forkserver = ForkserverExecutor::builder()
+        let cmplog_executor = ForkserverExecutor::builder()
             .program(exec)
             .debug_child(debug_child)
             .shmem_provider(&mut shmem_provider)
             .parse_afl_cmdline(arguments)
             .is_persistent(true)
+            .timeout(timeout * 10)
+            .kill_signal(signal)
             .build(tuple_list!(cmplog_observer))
             .unwrap();
-
-        let cmplog_executor =
-            TimeoutForkserverExecutor::with_signal(cmplog_forkserver, timeout * 10, signal)
-                .expect("Failed to create the executor.");
 
         let tracing = AFLppCmplogTracingStage::with_cmplog_observer_name(cmplog_executor, "cmplog");
 
@@ -374,11 +375,10 @@ fn fuzz(
         let cb = |_fuzzer: &mut _,
                   _executor: &mut _,
                   state: &mut StdState<_, InMemoryOnDiskCorpus<_>, _, _>,
-                  _event_manager: &mut _,
-                  corpus_id: CorpusId|
-         -> Result<bool, libafl::Error> {
-            let corpus = state.corpus().get(corpus_id)?.borrow();
-            let res = corpus.scheduled_count() == 1; // let's try on the 2nd trial
+                  _event_manager: &mut _|
+         -> Result<bool, Error> {
+            let testcase = state.current_testcase()?;
+            let res = testcase.scheduled_count() == 1; // let's try on the 2nd trial
 
             Ok(res)
         };

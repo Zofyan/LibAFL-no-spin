@@ -20,8 +20,8 @@ use crate::{
     observers::ObserversTuple,
     schedulers::Scheduler,
     start_timer,
-    state::{HasCorpus, HasExecutions, HasLastReportTime, HasMetadata, HasRand},
-    Error, EvaluatorObservers, ExecutionProcessor, HasScheduler,
+    state::{HasCorpus, HasExecutions, HasLastReportTime, HasRand},
+    Error, EvaluatorObservers, ExecutionProcessor, HasMetadata, HasScheduler,
 };
 #[cfg(feature = "introspection")]
 use crate::{monitors::PerfFeature, state::HasClientPerfMonitor};
@@ -52,8 +52,6 @@ where
     current_corpus_idx: Option<CorpusId>,
     testcases_to_do: usize,
     testcases_done: usize,
-
-    stage_idx: i32,
 
     mutator: M,
 
@@ -150,9 +148,7 @@ where
         mark_feature_time!(state, PerfFeature::GetInputFromCorpus);
 
         start_timer!(state);
-        self.mutator
-            .mutate(state, &mut input, self.stage_idx)
-            .unwrap();
+        self.mutator.mutate(state, &mut input).unwrap();
         mark_feature_time!(state, PerfFeature::Mutate);
 
         self.push_stage_helper_mut()
@@ -173,11 +169,10 @@ where
     ) -> Result<(), Error> {
         // todo: is_interesting, etc.
 
-        fuzzer.process_execution(state, event_mgr, last_input, observers, &exit_kind, true)?;
+        fuzzer.execute_and_process(state, event_mgr, last_input, observers, &exit_kind, true)?;
 
         start_timer!(state);
-        self.mutator
-            .post_exec(state, self.stage_idx, self.current_corpus_idx)?;
+        self.mutator.post_exec(state, self.current_corpus_idx)?;
         mark_feature_time!(state, PerfFeature::MutatePostExec);
         self.testcases_done += 1;
 
@@ -234,7 +229,6 @@ where
         mutator: M,
         shared_state: Rc<RefCell<Option<PushStageSharedState<CS, EM, OT, Z>>>>,
         exit_kind: Rc<Cell<Option<ExitKind>>>,
-        stage_idx: i32,
     ) -> Self {
         Self {
             mutator,
@@ -242,7 +236,6 @@ where
             current_corpus_idx: None, // todo
             testcases_to_do: 0,
             testcases_done: 0,
-            stage_idx,
         }
     }
 }

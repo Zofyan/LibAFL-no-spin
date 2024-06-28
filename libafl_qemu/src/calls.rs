@@ -7,14 +7,18 @@ use libafl::{
     observers::{stacktrace::BacktraceObserver, ObserversTuple},
 };
 use libafl_bolts::{tuples::MatchFirstType, Named};
+use libafl_qemu_sys::GuestAddr;
 use thread_local::ThreadLocal;
 
 use crate::{
     capstone,
-    emu::{ArchExtras, Emulator},
-    helper::{HasInstrumentationFilter, QemuHelper, QemuHelperTuple, QemuInstrumentationFilter},
+    emu::ArchExtras,
+    helper::{
+        HasInstrumentationFilter, IsFilter, QemuHelper, QemuHelperTuple,
+        QemuInstrumentationAddressRangeFilter,
+    },
     hooks::{Hook, QemuHooks},
-    GuestAddr,
+    Qemu,
 };
 
 pub trait CallTraceCollector: 'static + Debug {
@@ -39,7 +43,7 @@ pub trait CallTraceCollector: 'static + Debug {
         QT: QemuHelperTuple<S>;
 
     // Frowarded from the `QemuCallTracerHelper`
-    fn pre_exec<I>(&mut self, _emulator: &Emulator, _input: &I)
+    fn pre_exec<I>(&mut self, _qemu: Qemu, _input: &I)
     where
         I: Input,
     {
@@ -47,7 +51,7 @@ pub trait CallTraceCollector: 'static + Debug {
 
     fn post_exec<OT, S>(
         &mut self,
-        _emulator: &Emulator,
+        _qemu: Qemu,
         _input: &S::Input,
         _observers: &mut OT,
         _exit_kind: &mut ExitKind,
@@ -79,13 +83,13 @@ pub trait CallTraceCollectorTuple: 'static + MatchFirstType + Debug {
         S: UsesInput,
         QT: QemuHelperTuple<S>;
 
-    fn pre_exec_all<I>(&mut self, _emulator: &Emulator, input: &I)
+    fn pre_exec_all<I>(&mut self, _qemu: Qemu, input: &I)
     where
         I: Input;
 
     fn post_exec_all<OT, S>(
         &mut self,
-        _emulator: &Emulator,
+        _qemu: Qemu,
         input: &S::Input,
         _observers: &mut OT,
         _exit_kind: &mut ExitKind,
@@ -119,7 +123,7 @@ impl CallTraceCollectorTuple for () {
     {
     }
 
-    fn pre_exec_all<I>(&mut self, _emulator: &Emulator, _input: &I)
+    fn pre_exec_all<I>(&mut self, _qemu: Qemu, _input: &I)
     where
         I: Input,
     {
@@ -127,7 +131,7 @@ impl CallTraceCollectorTuple for () {
 
     fn post_exec_all<OT, S>(
         &mut self,
-        _emulator: &Emulator,
+        _emulator: Qemu,
         _input: &S::Input,
         _observers: &mut OT,
         _exit_kind: &mut ExitKind,
@@ -187,17 +191,17 @@ where
         self.1.on_ret_all(hooks, state, pc, ret_addr);
     }
 
-    fn pre_exec_all<I>(&mut self, emulator: &Emulator, input: &I)
+    fn pre_exec_all<I>(&mut self, qemu: Qemu, input: &I)
     where
         I: Input,
     {
-        self.0.pre_exec(emulator, input);
-        self.1.pre_exec_all(emulator, input);
+        self.0.pre_exec(qemu, input);
+        self.1.pre_exec_all(qemu, input);
     }
 
     fn post_exec_all<OT, S>(
         &mut self,
-        emulator: &Emulator,
+        qemu: Qemu,
         input: &S::Input,
         observers: &mut OT,
         exit_kind: &mut ExitKind,
@@ -205,8 +209,8 @@ where
         OT: ObserversTuple<S>,
         S: UsesInput,
     {
-        self.0.post_exec(emulator, input, observers, exit_kind);
-        self.1.post_exec_all(emulator, input, observers, exit_kind);
+        self.0.post_exec(qemu, input, observers, exit_kind);
+        self.1.post_exec_all(qemu, input, observers, exit_kind);
     }
 }
 
@@ -215,7 +219,7 @@ pub struct QemuCallTracerHelper<T>
 where
     T: CallTraceCollectorTuple,
 {
-    filter: QemuInstrumentationFilter,
+    filter: QemuInstrumentationAddressRangeFilter,
     cs: Capstone,
     collectors: Option<T>,
 }
@@ -225,7 +229,7 @@ where
     T: CallTraceCollectorTuple,
 {
     #[must_use]
-    pub fn new(filter: QemuInstrumentationFilter, collectors: T) -> Self {
+    pub fn new(filter: QemuInstrumentationAddressRangeFilter, collectors: T) -> Self {
         Self {
             filter,
             cs: capstone().detail(true).build().unwrap(),
@@ -243,7 +247,7 @@ where
         S: UsesInput,
         QT: QemuHelperTuple<S>,
     {
-        let ret_addr: GuestAddr = hooks.emulator().read_return_address().unwrap();
+        let ret_addr: GuestAddr = hooks.qemu().read_return_address().unwrap();
 
         // log::info!("RET @ 0x{:#x}", ret_addr);
 
@@ -289,7 +293,7 @@ where
             .unwrap();
         }
 
-        let emu = hooks.emulator();
+        let emu = hooks.qemu();
 
         if let Some(h) = hooks.helpers().match_first_type::<Self>() {
             #[allow(unused_mut)]
@@ -380,15 +384,17 @@ where
     }
 }
 
-impl<T> HasInstrumentationFilter for QemuCallTracerHelper<T>
+impl<T, S> HasInstrumentationFilter<QemuInstrumentationAddressRangeFilter, S>
+    for QemuCallTracerHelper<T>
 where
     T: CallTraceCollectorTuple,
+    S: UsesInput,
 {
-    fn filter(&self) -> &QemuInstrumentationFilter {
+    fn filter(&self) -> &QemuInstrumentationAddressRangeFilter {
         &self.filter
     }
 
-    fn filter_mut(&mut self) -> &mut QemuInstrumentationFilter {
+    fn filter_mut(&mut self) -> &mut QemuInstrumentationAddressRangeFilter {
         &mut self.filter
     }
 }
@@ -409,16 +415,13 @@ where
         );
     }
 
-    fn pre_exec(&mut self, emulator: &Emulator, input: &S::Input) {
-        self.collectors
-            .as_mut()
-            .unwrap()
-            .pre_exec_all(emulator, input);
+    fn pre_exec(&mut self, qemu: Qemu, input: &S::Input) {
+        self.collectors.as_mut().unwrap().pre_exec_all(qemu, input);
     }
 
     fn post_exec<OT>(
         &mut self,
-        emulator: &Emulator,
+        qemu: Qemu,
         input: &S::Input,
         observers: &mut OT,
         exit_kind: &mut ExitKind,
@@ -428,7 +431,7 @@ where
         self.collectors
             .as_mut()
             .unwrap()
-            .post_exec_all(emulator, input, observers, exit_kind);
+            .post_exec_all(qemu, input, observers, exit_kind);
     }
 }
 
@@ -495,7 +498,7 @@ impl CallTraceCollector for OnCrashBacktraceCollector {
         self.callstack_hash ^= ret_addr as u64;
     }
 
-    fn pre_exec<I>(&mut self, _emulator: &Emulator, _input: &I)
+    fn pre_exec<I>(&mut self, _qemu: Qemu, _input: &I)
     where
         I: Input,
     {
@@ -504,7 +507,7 @@ impl CallTraceCollector for OnCrashBacktraceCollector {
 
     fn post_exec<OT, S>(
         &mut self,
-        _emulator: &Emulator,
+        _qemu: Qemu,
         _input: &S::Input,
         observers: &mut OT,
         exit_kind: &mut ExitKind,
@@ -599,7 +602,7 @@ impl CallTraceCollector for FullBacktraceCollector {
         }
     }
 
-    fn pre_exec<I>(&mut self, _emulator: &Emulator, _input: &I)
+    fn pre_exec<I>(&mut self, _qemu: Qemu, _input: &I)
     where
         I: Input,
     {

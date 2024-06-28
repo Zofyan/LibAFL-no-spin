@@ -6,19 +6,18 @@ use alloc::{
 };
 use core::{cmp::Ordering, fmt::Debug, marker::PhantomData, ops::Range};
 
-use libafl_bolts::{rands::Rand, tuples::MatchName};
+use libafl_bolts::{rands::Rand, tuples::MatchName, Named};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    corpus::{Corpus, CorpusId},
     events::EventFirer,
     executors::{Executor, HasObservers},
     inputs::HasBytesVec,
     mutators::mutations::buffer_copy,
     observers::{MapObserver, ObserversTuple},
-    stages::Stage,
-    state::{HasCorpus, HasMetadata, HasRand, UsesState},
-    Error,
+    stages::{RetryRestartHelper, Stage},
+    state::{HasCorpus, HasCurrentTestcase, HasRand, UsesState},
+    Error, HasMetadata, HasNamedMetadata,
 };
 
 // Bigger range is better
@@ -55,26 +54,36 @@ impl Ord for Earlier {
 
 /// The mutational stage using power schedules
 #[derive(Clone, Debug)]
-pub struct ColorizationStage<EM, O, E, Z> {
+pub struct ColorizationStage<C, E, EM, O, Z> {
     map_observer_name: String,
     #[allow(clippy::type_complexity)]
-    phantom: PhantomData<(E, EM, O, Z)>,
+    phantom: PhantomData<(C, E, EM, O, E, Z)>,
 }
 
-impl<EM, O, E, Z> UsesState for ColorizationStage<EM, O, E, Z>
+impl<C, E, EM, O, Z> UsesState for ColorizationStage<C, E, EM, O, Z>
 where
     E: UsesState,
 {
     type State = E::State;
 }
 
-impl<E, EM, O, Z> Stage<E, EM, Z> for ColorizationStage<EM, O, E, Z>
+impl<C, E, EM, O, Z> Named for ColorizationStage<C, E, EM, O, Z>
+where
+    E: UsesState,
+{
+    fn name(&self) -> &str {
+        &self.map_observer_name
+    }
+}
+
+impl<C, E, EM, O, Z> Stage<E, EM, Z> for ColorizationStage<C, E, EM, O, Z>
 where
     EM: UsesState<State = E::State> + EventFirer,
     E: HasObservers + Executor<EM, Z>,
-    E::State: HasCorpus + HasMetadata + HasRand,
+    E::State: HasCorpus + HasMetadata + HasRand + HasNamedMetadata,
     E::Input: HasBytesVec,
     O: MapObserver,
+    C: AsRef<O> + Named,
     Z: UsesState<State = E::State>,
 {
     #[inline]
@@ -85,19 +94,21 @@ where
         executor: &mut E, // don't need the *main* executor for tracing
         state: &mut E::State,
         manager: &mut EM,
-        corpus_idx: CorpusId,
     ) -> Result<(), Error> {
         // Run with the mutated input
-        Self::colorize(
-            fuzzer,
-            executor,
-            state,
-            manager,
-            corpus_idx,
-            &self.map_observer_name,
-        )?;
+        Self::colorize(fuzzer, executor, state, manager, &self.map_observer_name)?;
 
         Ok(())
+    }
+
+    fn restart_progress_should_run(&mut self, state: &mut Self::State) -> Result<bool, Error> {
+        // TODO this stage needs a proper resume
+        RetryRestartHelper::restart_progress_should_run(state, self, 3)
+    }
+
+    fn clear_restart_progress(&mut self, state: &mut Self::State) -> Result<(), Error> {
+        // TODO this stage needs a proper resume
+        RetryRestartHelper::clear_restart_progress(state, self)
     }
 }
 
@@ -140,10 +151,11 @@ impl TaintMetadata {
 
 libafl_bolts::impl_serdeany!(TaintMetadata);
 
-impl<EM, O, E, Z> ColorizationStage<EM, O, E, Z>
+impl<C, E, EM, O, Z> ColorizationStage<C, E, EM, O, Z>
 where
     EM: UsesState<State = E::State> + EventFirer,
     O: MapObserver,
+    C: AsRef<O> + Named,
     E: HasObservers + Executor<EM, Z>,
     E::State: HasCorpus + HasMetadata + HasRand,
     E::Input: HasBytesVec,
@@ -156,10 +168,9 @@ where
         executor: &mut E,
         state: &mut E::State,
         manager: &mut EM,
-        corpus_idx: CorpusId,
         name: &str,
     ) -> Result<E::Input, Error> {
-        let mut input = state.corpus().cloned_input_for_id(corpus_idx)?;
+        let mut input = state.current_input_cloned()?;
         // The backup of the input
         let backup = input.clone();
         // This is the buffer we'll randomly mutate during type_replace
@@ -288,9 +299,9 @@ where
 
     #[must_use]
     /// Creates a new [`ColorizationStage`]
-    pub fn new(map_observer_name: &O) -> Self {
+    pub fn new(map_observer: &C) -> Self {
         Self {
-            map_observer_name: map_observer_name.name().to_string(),
+            map_observer_name: map_observer.name().to_string(),
             phantom: PhantomData,
         }
     }
@@ -310,8 +321,9 @@ where
 
         let observer = executor
             .observers()
-            .match_name::<O>(name)
-            .ok_or_else(|| Error::key_not_found("MapObserver not found".to_string()))?;
+            .match_name::<C>(name)
+            .ok_or_else(|| Error::key_not_found("MapObserver not found".to_string()))?
+            .as_ref();
 
         let hash = observer.hash() as usize;
 

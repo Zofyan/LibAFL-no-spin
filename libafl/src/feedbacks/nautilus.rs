@@ -6,7 +6,6 @@ use std::fs::create_dir_all;
 use grammartec::{chunkstore::ChunkStore, context::Context};
 use libafl_bolts::Named;
 use serde::{Deserialize, Serialize};
-use serde_json;
 
 use crate::{
     corpus::{Corpus, Testcase},
@@ -16,8 +15,8 @@ use crate::{
     generators::NautilusContext,
     inputs::NautilusInput,
     observers::ObserversTuple,
-    state::{HasCorpus, HasMetadata, State},
-    Error,
+    state::{HasCorpus, State},
+    Error, HasMetadata,
 };
 
 /// Metadata for Nautilus grammar mutator chunks
@@ -100,9 +99,10 @@ where
         Ok(false)
     }
 
-    fn append_metadata<OT>(
+    fn append_metadata<EM, OT>(
         &mut self,
         state: &mut S,
+        _manager: &mut EM,
         _observers: &OT,
         testcase: &mut Testcase<S::Input>,
     ) -> Result<(), Error>

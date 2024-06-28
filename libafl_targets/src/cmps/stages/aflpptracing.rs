@@ -4,15 +4,14 @@ use core::marker::PhantomData;
 #[cfg(feature = "introspection")]
 use libafl::state::HasClientPerfMonitor;
 use libafl::{
-    corpus::{Corpus, CorpusId},
     executors::{Executor, HasObservers},
     inputs::{BytesInput, UsesInput},
     observers::ObserversTuple,
-    stages::{colorization::TaintMetadata, Stage},
-    state::{HasCorpus, HasExecutions, HasMetadata, UsesState},
-    Error,
+    stages::{colorization::TaintMetadata, RetryRestartHelper, Stage},
+    state::{HasCorpus, HasCurrentTestcase, HasExecutions, UsesState},
+    Error, HasMetadata, HasNamedMetadata,
 };
-use libafl_bolts::tuples::MatchName;
+use libafl_bolts::{tuples::MatchName, Named};
 
 use crate::cmps::observers::AFLppCmpLogObserver;
 
@@ -32,11 +31,18 @@ where
     type State = TE::State;
 }
 
+impl<EM, TE, Z> Named for AFLppCmplogTracingStage<EM, TE, Z> {
+    fn name(&self) -> &str {
+        "AFLppCmplogTracingStage"
+    }
+}
+
 impl<E, EM, TE, Z> Stage<E, EM, Z> for AFLppCmplogTracingStage<EM, TE, Z>
 where
     E: UsesState<State = TE::State>,
     TE: Executor<EM, Z> + HasObservers,
-    TE::State: HasExecutions + HasCorpus + HasMetadata + UsesInput<Input = BytesInput>,
+    TE::State:
+        HasExecutions + HasCorpus + HasMetadata + UsesInput<Input = BytesInput> + HasNamedMetadata,
     EM: UsesState<State = TE::State>,
     Z: UsesState<State = TE::State>,
 {
@@ -47,11 +53,9 @@ where
         _executor: &mut E,
         state: &mut TE::State,
         manager: &mut EM,
-        corpus_idx: CorpusId,
     ) -> Result<(), Error> {
         // First run with the un-mutated input
-
-        let unmutated_input = state.corpus().cloned_input_for_id(corpus_idx)?;
+        let unmutated_input = state.current_input_cloned()?;
 
         if let Some(name) = &self.cmplog_observer_name {
             if let Some(ob) = self
@@ -116,6 +120,16 @@ where
             .post_exec_all(state, &mutated_input, &exit_kind)?;
 
         Ok(())
+    }
+
+    fn restart_progress_should_run(&mut self, state: &mut Self::State) -> Result<bool, Error> {
+        // TODO: this may need better resumption? (Or is it always used with a forkserver?)
+        RetryRestartHelper::restart_progress_should_run(state, self, 3)
+    }
+
+    fn clear_restart_progress(&mut self, state: &mut Self::State) -> Result<(), Error> {
+        // TODO: this may need better resumption? (Or is it always used with a forkserver?)
+        RetryRestartHelper::clear_restart_progress(state, self)
     }
 }
 

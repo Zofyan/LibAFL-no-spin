@@ -1,9 +1,12 @@
 //! Compiletime lists/tuples used throughout the `LibAFL` universe
 
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
 #[rustversion::not(nightly)]
 use core::any::type_name;
 use core::{
     any::TypeId,
+    mem::transmute,
     ptr::{addr_of, addr_of_mut},
 };
 
@@ -11,7 +14,7 @@ pub use tuple_list::{tuple_list, tuple_list_type, TupleList};
 
 #[cfg(any(feature = "xxh3", feature = "alloc"))]
 use crate::hash_std;
-use crate::Named;
+use crate::{HasLen, Named};
 
 /// Returns if the type `T` is equal to `U`
 /// From <https://stackoverflow.com/a/60138532/7658998>
@@ -88,25 +91,41 @@ where
     }
 }
 
+/// Create a [`Vec`] from a tuple list or similar
+/// (We need this trait since we cannot implement `Into` for foreign types)
+#[cfg(feature = "alloc")]
+pub trait IntoVec<T> {
+    /// Convert this into a [`Vec`], reversed.
+    /// (Having this method around makes some implementations more performant)
+    fn into_vec_reversed(self) -> Vec<T>
+    where
+        Self: Sized,
+    {
+        let mut ret = self.into_vec();
+        ret.reverse();
+        ret
+    }
+
+    /// Convert this into a [`Vec`].
+    fn into_vec(self) -> Vec<T>;
+}
+
+#[cfg(feature = "alloc")]
+impl<T> IntoVec<T> for () {
+    #[inline]
+    fn into_vec(self) -> Vec<T> {
+        Vec::new()
+    }
+}
+
 /// Gets the length of the element
 pub trait HasConstLen {
     /// The length as constant `usize`
     const LEN: usize;
-
-    /// The length
-    fn len(&self) -> usize;
-    /// Returns true, if empty
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 impl HasConstLen for () {
     const LEN: usize = 0;
-
-    fn len(&self) -> usize {
-        0
-    }
 }
 
 impl<Head, Tail> HasConstLen for (Head, Tail)
@@ -114,9 +133,32 @@ where
     Tail: HasConstLen,
 {
     const LEN: usize = 1 + Tail::LEN;
+}
 
+impl<Head, Tail> HasLen for (Head, Tail)
+where
+    Tail: HasLen,
+{
+    #[inline]
     fn len(&self) -> usize {
-        1 + self.1.len()
+        self.1.len() + 1
+    }
+}
+
+impl<Tail> HasLen for (Tail,)
+where
+    Tail: HasLen,
+{
+    #[inline]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl HasLen for () {
+    #[inline]
+    fn len(&self) -> usize {
+        0
     }
 }
 
@@ -231,7 +273,7 @@ where
     fn take<'a, T: 'static>(mut self) -> (Option<&'a T>, Self) {
         if TypeId::of::<T>() == TypeId::of::<Head>() {
             let r = self.0.take();
-            (unsafe { core::mem::transmute(r) }, self)
+            (unsafe { transmute::<Option<&Head>, Option<&T>>(r) }, self)
         } else {
             let (r, tail) = self.1.take::<T>();
             (r, (self.0, tail))
@@ -247,7 +289,10 @@ where
     fn take<'a, T: 'static>(mut self) -> (Option<&'a T>, Self) {
         if TypeId::of::<T>() == TypeId::of::<Head>() {
             let r = self.0.take();
-            (unsafe { core::mem::transmute(r) }, self)
+            (
+                unsafe { transmute::<Option<&mut Head>, Option<&T>>(r) },
+                self,
+            )
         } else {
             let (r, tail) = self.1.take::<T>();
             (r, (self.0, tail))
@@ -275,7 +320,10 @@ where
     fn take<'a, T: 'static>(mut self) -> (Option<&'a mut T>, Self) {
         if TypeId::of::<T>() == TypeId::of::<Head>() {
             let r = self.0.take();
-            (unsafe { core::mem::transmute(r) }, self)
+            (
+                unsafe { transmute::<Option<&mut Head>, Option<&mut T>>(r) },
+                self,
+            )
         } else {
             let (r, tail) = self.1.take::<T>();
             (r, (self.0, tail))

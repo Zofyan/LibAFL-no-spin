@@ -7,7 +7,7 @@ use std::{
     time::SystemTime,
 };
 
-use libafl_bolts::{current_time, shmem::ShMemProvider};
+use libafl_bolts::{current_time, shmem::ShMemProvider, Named};
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "introspection")]
@@ -18,9 +18,9 @@ use crate::{
     executors::{Executor, ExitKind, HasObservers},
     fuzzer::{Evaluator, EvaluatorObservers, ExecutionProcessor},
     inputs::{Input, InputConverter, UsesInput},
-    stages::Stage,
-    state::{HasCorpus, HasExecutions, HasMetadata, HasRand, State, UsesState},
-    Error,
+    stages::{RetryRestartHelper, Stage},
+    state::{HasCorpus, HasExecutions, HasRand, State, UsesState},
+    Error, HasMetadata, HasNamedMetadata,
 };
 
 /// Metadata used to store information about disk sync time
@@ -59,13 +59,22 @@ where
     type State = E::State;
 }
 
+impl<CB, E, EM, Z> Named for SyncFromDiskStage<CB, E, EM, Z>
+where
+    E: UsesState,
+{
+    fn name(&self) -> &str {
+        self.sync_dir.to_str().unwrap()
+    }
+}
+
 impl<CB, E, EM, Z> Stage<E, EM, Z> for SyncFromDiskStage<CB, E, EM, Z>
 where
     CB: FnMut(&mut Z, &mut Z::State, &Path) -> Result<<Z::State as UsesInput>::Input, Error>,
     E: UsesState<State = Z::State>,
     EM: UsesState<State = Z::State>,
     Z: Evaluator<E, EM>,
-    Z::State: HasCorpus + HasRand + HasMetadata,
+    Z::State: HasCorpus + HasRand + HasMetadata + HasNamedMetadata,
 {
     #[inline]
     fn perform(
@@ -74,7 +83,6 @@ where
         executor: &mut E,
         state: &mut Z::State,
         manager: &mut EM,
-        _corpus_idx: CorpusId,
     ) -> Result<(), Error> {
         let last = state
             .metadata_map()
@@ -101,6 +109,18 @@ where
         state.introspection_monitor_mut().finish_stage();
 
         Ok(())
+    }
+
+    #[inline]
+    fn restart_progress_should_run(&mut self, state: &mut Self::State) -> Result<bool, Error> {
+        // TODO: Needs proper crash handling for when an imported testcase crashes
+        // For now, Make sure we don't get stuck crashing on this testcase
+        RetryRestartHelper::restart_progress_should_run(state, self, 3)
+    }
+
+    #[inline]
+    fn clear_restart_progress(&mut self, state: &mut Self::State) -> Result<(), Error> {
+        RetryRestartHelper::clear_restart_progress(state, self)
     }
 }
 
@@ -219,7 +239,7 @@ impl SyncFromBrokerMetadata {
 
 /// A stage that loads testcases from disk to sync with other fuzzers such as AFL++
 #[derive(Debug)]
-pub struct SyncFromBrokerStage<IC, ICB, DI, S, SP>
+pub struct SyncFromBrokerStage<DI, IC, ICB, S, SP>
 where
     SP: ShMemProvider + 'static,
     S: UsesInput,
@@ -227,10 +247,10 @@ where
     ICB: InputConverter<From = DI, To = S::Input>,
     DI: Input,
 {
-    client: LlmpEventConverter<IC, ICB, DI, S, SP>,
+    client: LlmpEventConverter<DI, IC, ICB, S, SP>,
 }
 
-impl<IC, ICB, DI, S, SP> UsesState for SyncFromBrokerStage<IC, ICB, DI, S, SP>
+impl<DI, IC, ICB, S, SP> UsesState for SyncFromBrokerStage<DI, IC, ICB, S, SP>
 where
     SP: ShMemProvider + 'static,
     S: State,
@@ -241,7 +261,7 @@ where
     type State = S;
 }
 
-impl<E, EM, IC, ICB, DI, S, SP, Z> Stage<E, EM, Z> for SyncFromBrokerStage<IC, ICB, DI, S, SP>
+impl<E, EM, IC, ICB, DI, S, SP, Z> Stage<E, EM, Z> for SyncFromBrokerStage<DI, IC, ICB, S, SP>
 where
     EM: UsesState<State = S> + EventFirer,
     S: State + HasExecutions + HasCorpus + HasRand + HasMetadata + HasTestcase,
@@ -260,7 +280,6 @@ where
         executor: &mut E,
         state: &mut Z::State,
         manager: &mut EM,
-        _corpus_idx: CorpusId,
     ) -> Result<(), Error> {
         if self.client.can_convert() {
             let last_id = state
@@ -310,9 +329,21 @@ where
         state.introspection_monitor_mut().finish_stage();
         Ok(())
     }
+
+    #[inline]
+    fn restart_progress_should_run(&mut self, _state: &mut Self::State) -> Result<bool, Error> {
+        // No restart handling needed - does not execute the target.
+        Ok(true)
+    }
+
+    #[inline]
+    fn clear_restart_progress(&mut self, _state: &mut Self::State) -> Result<(), Error> {
+        // Not needed - does not execute the target.
+        Ok(())
+    }
 }
 
-impl<IC, ICB, DI, S, SP> SyncFromBrokerStage<IC, ICB, DI, S, SP>
+impl<DI, IC, ICB, S, SP> SyncFromBrokerStage<DI, IC, ICB, S, SP>
 where
     SP: ShMemProvider + 'static,
     S: UsesInput,
@@ -322,7 +353,7 @@ where
 {
     /// Creates a new [`SyncFromBrokerStage`]
     #[must_use]
-    pub fn new(client: LlmpEventConverter<IC, ICB, DI, S, SP>) -> Self {
+    pub fn new(client: LlmpEventConverter<DI, IC, ICB, S, SP>) -> Self {
         Self { client }
     }
 }

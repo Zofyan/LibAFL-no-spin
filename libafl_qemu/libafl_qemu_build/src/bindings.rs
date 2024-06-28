@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{collections::hash_map, fs, hash::Hasher, io::Read, path::Path};
 
 use bindgen::{BindgenError, Bindings};
 
@@ -45,6 +45,9 @@ const WRAPPER_HEADER: &str = r#"
 #include "user/safe-syscall.h"
 #include "qemu/selfmap.h"
 #include "cpu_loop-common.h"
+#include "qemu/selfmap.h"
+
+#include "libafl/user.h"
 
 #else
 
@@ -55,8 +58,8 @@ const WRAPPER_HEADER: &str = r#"
 #include "sysemu/tcg.h"
 #include "sysemu/replay.h"
 
-#include "libafl_extras/syx-snapshot/device-save.h"
-#include "libafl_extras/syx-snapshot/syx-snapshot.h"
+#include "libafl/syx-snapshot/device-save.h"
+#include "libafl/syx-snapshot/syx-snapshot.h"
 
 #endif
 
@@ -76,9 +79,9 @@ const WRAPPER_HEADER: &str = r#"
 
 #include "qemu/plugin-memory.h"
 
-#include "libafl_extras/exit.h"
-#include "libafl_extras/hook.h"
-#include "libafl_extras/jit.h"
+#include "libafl/exit.h"
+#include "libafl/hook.h"
+#include "libafl/jit.h"
 
 "#;
 
@@ -88,7 +91,31 @@ pub fn generate(
     clang_args: Vec<String>,
 ) -> Result<Bindings, BindgenError> {
     let wrapper_h = build_dir.join("wrapper.h");
-    fs::write(&wrapper_h, WRAPPER_HEADER).expect("Unable to write wrapper.h");
+    let existing_wrapper_h = fs::File::open(&wrapper_h);
+    let mut must_rewrite_wrapper = true;
+
+    // Check if equivalent wrapper file already exists without relying on filesystem timestamp.
+    if let Ok(mut wrapper_file) = existing_wrapper_h {
+        let mut existing_wrapper_content = Vec::with_capacity(WRAPPER_HEADER.len());
+        wrapper_file
+            .read_to_end(existing_wrapper_content.as_mut())
+            .unwrap();
+
+        let mut existing_wrapper_hasher = hash_map::DefaultHasher::new();
+        existing_wrapper_hasher.write(existing_wrapper_content.as_ref());
+
+        let mut wrapper_h_hasher = hash_map::DefaultHasher::new();
+        wrapper_h_hasher.write(WRAPPER_HEADER.as_bytes());
+
+        // Check if wrappers are the same
+        if existing_wrapper_hasher.finish() == wrapper_h_hasher.finish() {
+            must_rewrite_wrapper = false;
+        }
+    }
+
+    if must_rewrite_wrapper {
+        fs::write(&wrapper_h, WRAPPER_HEADER).expect("Unable to write wrapper.h");
+    }
 
     let bindings = bindgen::Builder::default()
         .derive_debug(true)
@@ -112,11 +139,14 @@ pub fn generate(
         .allowlist_type("MemOpIdx")
         .allowlist_type("MemOp")
         .allowlist_type("DeviceSnapshotKind")
+        .allowlist_type("ShutdownCause")
         .allowlist_type("libafl_exit_reason")
         .allowlist_type("libafl_exit_reason_kind")
         .allowlist_type("libafl_exit_reason_sync_backdoor")
         .allowlist_type("libafl_exit_reason_breakpoint")
         .allowlist_type("Syx.*")
+        .allowlist_type("libafl_mapinfo")
+        .allowlist_type("IntervalTreeRoot")
         .allowlist_function("qemu_user_init")
         .allowlist_function("target_mmap")
         .allowlist_function("target_mprotect")
@@ -134,8 +164,10 @@ pub fn generate(
         .allowlist_function("syx_.*")
         .allowlist_function("device_list_all")
         .allowlist_function("libafl_.*")
+        .allowlist_function("read_self_maps")
+        .allowlist_function("free_self_maps")
         .blocklist_function("main_loop_wait") // bindgen issue #1313
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks));
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
 
     // arch specific functions
     let bindings = if cpu_target == "i386" || cpu_target == "x86_64" {

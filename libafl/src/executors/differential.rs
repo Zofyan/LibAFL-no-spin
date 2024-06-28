@@ -2,7 +2,7 @@
 //! It wraps two executors that will be run after each other with the same input.
 //! In comparison to the [`crate::executors::CombinedExecutor`] it also runs the secondary executor in `run_target`.
 //!
-use core::{cell::UnsafeCell, fmt::Debug};
+use core::{cell::UnsafeCell, fmt::Debug, ptr};
 
 use libafl_bolts::{ownedref::OwnedMutPtr, tuples::MatchName};
 use serde::{Deserialize, Serialize};
@@ -17,13 +17,13 @@ use crate::{
 
 /// A [`DiffExecutor`] wraps a primary executor, forwarding its methods, and a secondary one
 #[derive(Debug)]
-pub struct DiffExecutor<A, B, OTA, OTB, DOT> {
+pub struct DiffExecutor<A, B, DOT, OTA, OTB> {
     primary: A,
     secondary: B,
     observers: UnsafeCell<ProxyObserversTuple<OTA, OTB, DOT>>,
 }
 
-impl<A, B, OTA, OTB, DOT> DiffExecutor<A, B, OTA, OTB, DOT> {
+impl<A, B, DOT, OTA, OTB> DiffExecutor<A, B, DOT, OTA, OTB> {
     /// Create a new `DiffExecutor`, wrapping the given `executor`s.
     pub fn new(primary: A, secondary: B, observers: DOT) -> Self
     where
@@ -37,8 +37,8 @@ impl<A, B, OTA, OTB, DOT> DiffExecutor<A, B, OTA, OTB, DOT> {
             primary,
             secondary,
             observers: UnsafeCell::new(ProxyObserversTuple {
-                primary: OwnedMutPtr::Ptr(core::ptr::null_mut()),
-                secondary: OwnedMutPtr::Ptr(core::ptr::null_mut()),
+                primary: OwnedMutPtr::Ptr(ptr::null_mut()),
+                secondary: OwnedMutPtr::Ptr(ptr::null_mut()),
                 differential: observers,
             }),
         }
@@ -55,7 +55,7 @@ impl<A, B, OTA, OTB, DOT> DiffExecutor<A, B, OTA, OTB, DOT> {
     }
 }
 
-impl<A, B, EM, DOT, Z> Executor<EM, Z> for DiffExecutor<A, B, A::Observers, B::Observers, DOT>
+impl<A, B, DOT, EM, Z> Executor<EM, Z> for DiffExecutor<A, B, DOT, A::Observers, B::Observers>
 where
     A: Executor<EM, Z> + HasObservers,
     B: Executor<EM, Z, State = A::State> + HasObservers,
@@ -77,7 +77,6 @@ where
             .pre_observe_first_all(observers.primary.as_mut())?;
         observers.primary.as_mut().pre_exec_all(state, input)?;
         let ret1 = self.primary.run_target(fuzzer, state, mgr, input)?;
-        self.primary.post_run_reset();
         observers
             .primary
             .as_mut()
@@ -90,7 +89,6 @@ where
             .pre_observe_second_all(observers.secondary.as_mut())?;
         observers.secondary.as_mut().pre_exec_all(state, input)?;
         let ret2 = self.secondary.run_target(fuzzer, state, mgr, input)?;
-        self.secondary.post_run_reset();
         observers
             .secondary
             .as_mut()
@@ -207,12 +205,12 @@ where
 
 impl<A, B, DOT> ProxyObserversTuple<A, B, DOT> {
     fn set(&mut self, primary: &A, secondary: &B) {
-        self.primary = OwnedMutPtr::Ptr(primary as *const A as *mut A);
-        self.secondary = OwnedMutPtr::Ptr(secondary as *const B as *mut B);
+        self.primary = OwnedMutPtr::Ptr(ptr::from_ref(primary) as *mut A);
+        self.secondary = OwnedMutPtr::Ptr(ptr::from_ref(secondary) as *mut B);
     }
 }
 
-impl<A, B, OTA, OTB, DOT> UsesObservers for DiffExecutor<A, B, OTA, OTB, DOT>
+impl<A, B, DOT, OTA, OTB> UsesObservers for DiffExecutor<A, B, DOT, OTA, OTB>
 where
     A: HasObservers<Observers = OTA>,
     B: HasObservers<Observers = OTB, State = A::State>,
@@ -223,7 +221,7 @@ where
     type Observers = ProxyObserversTuple<OTA, OTB, DOT>;
 }
 
-impl<A, B, OTA, OTB, DOT> UsesState for DiffExecutor<A, B, OTA, OTB, DOT>
+impl<A, B, DOT, OTA, OTB> UsesState for DiffExecutor<A, B, DOT, OTA, OTB>
 where
     A: UsesState,
     B: UsesState<State = A::State>,
@@ -231,7 +229,7 @@ where
     type State = A::State;
 }
 
-impl<A, B, OTA, OTB, DOT> HasObservers for DiffExecutor<A, B, OTA, OTB, DOT>
+impl<A, B, DOT, OTA, OTB> HasObservers for DiffExecutor<A, B, DOT, OTA, OTB>
 where
     A: HasObservers<Observers = OTA>,
     B: HasObservers<Observers = OTB, State = A::State>,

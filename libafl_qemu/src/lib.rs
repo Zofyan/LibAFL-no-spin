@@ -1,3 +1,10 @@
+#![cfg_attr(nightly, feature(used_with_arg))]
+//! Welcome to `LibAFL` QEMU
+//!
+//! __Warning__: The documentation is built by default for `x86_64` in `usermode`. To access the documentation of other architectures or `systemmode`, the documentation must be rebuilt with the right features.
+#![doc = include_str!("../../README.md")]
+/*! */
+#![cfg_attr(feature = "document-features", doc = document_features::document_features!())]
 // libafl_qemu only supports Linux currently
 #![cfg(target_os = "linux")]
 // This lint triggers too often on the current GuestAddr type when emulating 64-bit targets because
@@ -76,6 +83,11 @@ pub mod cmplog;
 #[cfg(not(any(cpu_target = "mips", cpu_target = "hexagon")))]
 pub use cmplog::QemuCmpLogHelper;
 
+#[cfg(all(emulation_mode = "usermode", feature = "injections"))]
+pub mod injections;
+#[cfg(all(emulation_mode = "usermode", feature = "injections"))]
+pub use injections::QemuInjectionHelper;
+
 #[cfg(all(emulation_mode = "usermode", not(cpu_target = "hexagon")))]
 pub mod snapshot;
 #[cfg(all(emulation_mode = "usermode", not(cpu_target = "hexagon")))]
@@ -84,7 +96,12 @@ pub use snapshot::QemuSnapshotHelper;
 #[cfg(all(emulation_mode = "usermode", not(cpu_target = "hexagon")))]
 pub mod asan;
 #[cfg(all(emulation_mode = "usermode", not(cpu_target = "hexagon")))]
-pub use asan::{init_with_asan, QemuAsanHelper};
+pub use asan::{init_qemu_with_asan, QemuAsanHelper};
+
+#[cfg(all(emulation_mode = "usermode", not(cpu_target = "hexagon")))]
+pub mod asan_guest;
+#[cfg(all(emulation_mode = "usermode", not(cpu_target = "hexagon")))]
+pub use asan_guest::{init_qemu_with_asan_guest, QemuAsanGuestHelper};
 
 #[cfg(not(cpu_target = "hexagon"))]
 pub mod calls;
@@ -99,6 +116,8 @@ pub use executor::QemuForkExecutor;
 pub mod emu;
 pub use emu::*;
 
+pub mod breakpoint;
+pub mod command;
 pub mod sync_backdoor;
 
 #[must_use]
@@ -143,7 +162,7 @@ pub fn python_module(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<emu::MapInfo>()?;
     m.add_class::<emu::GuestMaps>()?;
     m.add_class::<emu::SyscallHookResult>()?;
-    m.add_class::<emu::pybind::Emulator>()?;
+    m.add_class::<emu::pybind::Qemu>()?;
 
     Ok(())
 }
