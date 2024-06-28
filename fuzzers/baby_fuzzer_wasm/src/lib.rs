@@ -11,13 +11,11 @@ use libafl::{
     mutators::{havoc_mutations, StdScheduledMutator},
     observers::StdMapObserver,
     schedulers::QueueScheduler,
-    stages::{ExecutionCountRestartHelperMetadata, StdMutationalStage},
+    stages::{RetryCountRestartHelper, StdMutationalStage},
     state::{HasSolutions, StdState},
     Fuzzer, StdFuzzer,
 };
-use libafl_bolts::{
-    current_nanos, rands::StdRand, serdeany::RegistryBuilder, tuples::tuple_list, AsSlice,
-};
+use libafl_bolts::{rands::StdRand, serdeany::RegistryBuilder, tuples::tuple_list, AsSlice};
 use wasm_bindgen::prelude::*;
 use web_sys::{Performance, Window};
 
@@ -46,7 +44,7 @@ pub fn fuzz() {
     // No concurrency in WASM so these accesses are not racing.
     unsafe {
         RegistryBuilder::register::<MapFeedbackMetadata<u8>>();
-        RegistryBuilder::register::<ExecutionCountRestartHelperMetadata>();
+        RegistryBuilder::register::<RetryCountRestartHelper>();
     }
 
     let mut signals = [0u8; 64];
@@ -89,7 +87,7 @@ pub fn fuzz() {
     // create a State from scratch
     let mut state = StdState::new(
         // RNG
-        StdRand::with_seed(current_nanos()),
+        StdRand::new(),
         // Corpus that will be evolved, we keep it in memory for performance
         InMemoryCorpus::new(),
         // In a "real" fuzzing campaign, you should stash solutions in a JS array instead

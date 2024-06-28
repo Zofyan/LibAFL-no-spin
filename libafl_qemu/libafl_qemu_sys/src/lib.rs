@@ -5,6 +5,7 @@ Have a look at `libafl_qemu` for higher-level abstractions.
 __Warning__: The documentation is built by default for `x86_64` in `usermode`. To access the documentation of other architectures or systemmode, the documentation must be rebuilt with the right features.
 */
 
+#![forbid(unexpected_cfgs)]
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
@@ -12,13 +13,22 @@ __Warning__: The documentation is built by default for `x86_64` in `usermode`. T
 #![allow(unused_mut)]
 #![allow(clippy::all)]
 #![allow(clippy::pedantic)]
+#![cfg_attr(nightly, feature(used_with_arg))]
+
+use num_enum::{IntoPrimitive, TryFromPrimitive};
+use paste::paste;
+use strum_macros::EnumIter;
 
 #[cfg(all(not(feature = "clippy"), target_os = "linux"))]
 mod bindings {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
+#[cfg(all(not(feature = "clippy"), target_os = "linux"))]
+pub use bindings::*;
 
 #[cfg(any(feature = "clippy", not(target_os = "linux")))]
+#[allow(dead_code)]
+#[rustfmt::skip]
 mod x86_64_stub_bindings;
 
 #[cfg(emulation_mode = "usermode")]
@@ -28,9 +38,6 @@ pub use usermode::*;
 
 #[cfg(emulation_mode = "systemmode")]
 mod systemmode;
-use num_enum::{IntoPrimitive, TryFromPrimitive};
-use paste::paste;
-use strum_macros::EnumIter;
 #[cfg(emulation_mode = "systemmode")]
 pub use systemmode::*;
 
@@ -100,8 +107,6 @@ macro_rules! extern_c_checked {
 use core::ops::BitAnd;
 use std::ffi::c_void;
 
-#[cfg(all(not(feature = "clippy"), target_os = "linux"))]
-pub use bindings::*;
 #[cfg(feature = "python")]
 use pyo3::{pyclass, pymethods, IntoPy, PyObject, Python};
 #[cfg(any(feature = "clippy", not(target_os = "linux")))]
@@ -122,6 +127,7 @@ pub type GuestHwAddrInfo = crate::qemu_plugin_hwaddr;
 
 #[derive(Debug)]
 #[repr(C)]
+#[cfg(target_os = "linux")]
 #[cfg_attr(feature = "python", pyclass(unsendable))]
 pub struct MapInfo {
     start: GuestAddr,
@@ -209,6 +215,7 @@ extern_c_checked! {
     pub fn libafl_qemu_gdb_reply(buf: *const u8, len: usize);
 }
 
+#[cfg(target_os = "linux")]
 #[cfg_attr(feature = "python", pymethods)]
 impl MapInfo {
     #[must_use]

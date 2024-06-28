@@ -76,14 +76,14 @@ where
                 let mut n_paths = 0;
                 let mut v = 0.0;
                 let cur_index = state.corpus().current().unwrap();
-                for idx in corpus.ids() {
-                    let n_fuzz_entry = if cur_index == idx {
+                for id in corpus.ids() {
+                    let n_fuzz_entry = if cur_index == id {
                         entry
                             .metadata::<SchedulerTestcaseMetadata>()?
                             .n_fuzz_entry()
                     } else {
                         corpus
-                            .get(idx)?
+                            .get(id)?
                             .borrow()
                             .metadata::<SchedulerTestcaseMetadata>()?
                             .n_fuzz_entry()
@@ -303,19 +303,13 @@ where
 
         let q_bitmap_size = tcmeta.bitmap_size() as f64;
 
-        if let Some(strat) = psmeta.strat() {
-            match strat {
-                PowerSchedule::FAST
-                | PowerSchedule::COE
-                | PowerSchedule::LIN
-                | PowerSchedule::QUAD => {
-                    let hits = psmeta.n_fuzz()[tcmeta.n_fuzz_entry()];
-                    if hits > 0 {
-                        weight /= libm::log10(f64::from(hits)) + 1.0;
-                    }
-                }
-                // EXPLORE and EXPLOIT fall into this
-                _ => {}
+        if let Some(
+            PowerSchedule::FAST | PowerSchedule::COE | PowerSchedule::LIN | PowerSchedule::QUAD,
+        ) = psmeta.strat()
+        {
+            let hits = psmeta.n_fuzz()[tcmeta.n_fuzz_entry()];
+            if hits > 0 {
+                weight /= libm::log10(f64::from(hits)) + 1.0;
             }
         }
 

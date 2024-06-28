@@ -4,6 +4,7 @@ Welcome to `LibAFL`
 #![doc = include_str!("../README.md")]
 /*! */
 #![cfg_attr(feature = "document-features", doc = document_features::document_features!())]
+#![forbid(unexpected_cfgs)]
 #![allow(incomplete_features)]
 #![no_std]
 // For `type_eq`
@@ -29,7 +30,8 @@ Welcome to `LibAFL`
     clippy::ptr_cast_constness,
     clippy::unsafe_derive_deserialize,
     clippy::similar_names,
-    clippy::too_many_lines
+    clippy::too_many_lines,
+    clippy::into_iter_without_iter, // broken
 )]
 #![cfg_attr(not(test), warn(
     missing_debug_implementations,
@@ -87,13 +89,6 @@ pub extern crate alloc;
 #[allow(unused_imports)]
 #[macro_use]
 extern crate libafl_derive;
-/// Dummy export that will warn with a deprecation note on usage.
-/// Use the `libafl_bolts` crate instead.
-#[deprecated(
-    since = "0.11.0",
-    note = "All LibAFL bolts have moved to the libafl_bolts crate."
-)]
-pub mod bolts {}
 #[cfg(feature = "derive")]
 #[doc(hidden)]
 pub use libafl_derive::*;

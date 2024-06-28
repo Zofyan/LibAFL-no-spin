@@ -1,8 +1,12 @@
 //! Feedback and metatadata for stderr and stdout.
 
-use alloc::string::{String, ToString};
+use alloc::{borrow::Cow, string::String};
 
-use libafl_bolts::{impl_serdeany, Named};
+use libafl_bolts::{
+    impl_serdeany,
+    tuples::{Handle, Handled, MatchNameRef},
+    Named,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -28,7 +32,7 @@ impl_serdeany!(StdOutMetadata);
 /// is never interesting (use with an OR).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StdOutToMetadataFeedback {
-    name: String,
+    o_ref: Handle<StdOutObserver>,
 }
 
 impl<S> Feedback<S> for StdOutToMetadataFeedback
@@ -66,7 +70,7 @@ where
         EM: EventFirer<State = S>,
     {
         let observer = observers
-            .match_name::<StdOutObserver>(self.name())
+            .get(&self.o_ref)
             .ok_or(Error::illegal_state("StdOutObserver is missing"))?;
         let buffer = observer
             .stdout
@@ -86,30 +90,26 @@ where
     fn discard_metadata(&mut self, _state: &mut S, _input: &S::Input) -> Result<(), Error> {
         Ok(())
     }
+
+    #[cfg(feature = "track_hit_feedbacks")]
+    fn last_result(&self) -> Result<bool, Error> {
+        Ok(false)
+    }
 }
 
 impl Named for StdOutToMetadataFeedback {
     #[inline]
-    fn name(&self) -> &str {
-        self.name.as_str()
+    fn name(&self) -> &Cow<'static, str> {
+        self.o_ref.name()
     }
 }
 
 impl StdOutToMetadataFeedback {
-    /// Creates a new [`StdOutToMetadataFeedback`]. The provided `name` is
-    /// used to look up the observer.
-    #[must_use]
-    pub fn new(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-        }
-    }
-
     /// Creates a new [`StdOutToMetadataFeedback`].
     #[must_use]
-    pub fn with_observer(observer: &StdOutObserver) -> Self {
+    pub fn new(observer: &StdOutObserver) -> Self {
         Self {
-            name: observer.name().to_string(),
+            o_ref: observer.handle(),
         }
     }
 }
@@ -127,7 +127,7 @@ impl_serdeany!(StdErrMetadata);
 /// is never interesting (use with an OR).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StdErrToMetadataFeedback {
-    name: String,
+    o_ref: Handle<StdErrObserver>,
 }
 
 impl<S> Feedback<S> for StdErrToMetadataFeedback
@@ -165,7 +165,7 @@ where
         EM: EventFirer<State = S>,
     {
         let observer = observers
-            .match_name::<StdErrObserver>(self.name())
+            .get(&self.o_ref)
             .ok_or(Error::illegal_state("StdErrObserver is missing"))?;
         let buffer = observer
             .stderr
@@ -185,30 +185,25 @@ where
     fn discard_metadata(&mut self, _state: &mut S, _input: &S::Input) -> Result<(), Error> {
         Ok(())
     }
+    #[cfg(feature = "track_hit_feedbacks")]
+    fn last_result(&self) -> Result<bool, Error> {
+        Ok(false)
+    }
 }
 
 impl Named for StdErrToMetadataFeedback {
     #[inline]
-    fn name(&self) -> &str {
-        self.name.as_str()
+    fn name(&self) -> &Cow<'static, str> {
+        self.o_ref.name()
     }
 }
 
 impl StdErrToMetadataFeedback {
-    /// Creates a new [`StdErrToMetadataFeedback`]. The provided `name` is
-    /// used to look up the observer.
-    #[must_use]
-    pub fn new(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-        }
-    }
-
     /// Creates a new [`StdErrToMetadataFeedback`].
     #[must_use]
-    pub fn with_observer(observer: &StdErrObserver) -> Self {
+    pub fn new(observer: &StdErrObserver) -> Self {
         Self {
-            name: observer.name().to_string(),
+            o_ref: observer.handle(),
         }
     }
 }

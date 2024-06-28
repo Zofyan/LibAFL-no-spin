@@ -21,12 +21,12 @@ pub mod cached;
 #[cfg(feature = "std")]
 pub use cached::CachedOnDiskCorpus;
 
-#[cfg(feature = "cmin")]
+#[cfg(all(feature = "cmin", unix))]
 pub mod minimizer;
 use core::{cell::RefCell, fmt};
 
 pub mod nop;
-#[cfg(feature = "cmin")]
+#[cfg(all(feature = "cmin", unix))]
 pub use minimizer::*;
 pub use nop::NopCorpus;
 use serde::{Deserialize, Serialize};
@@ -36,7 +36,7 @@ use crate::{inputs::UsesInput, Error};
 /// An abstraction for the index that identify a testcase in the corpus
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(transparent)]
-pub struct CorpusId(pub(crate) usize);
+pub struct CorpusId(pub usize);
 
 impl fmt::Display for CorpusId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -67,8 +67,8 @@ impl From<CorpusId> for usize {
 #[macro_export]
 macro_rules! random_corpus_id {
     ($corpus:expr, $rand:expr) => {{
-        let cnt = $corpus.count() as u64;
-        let nth = $rand.below(cnt) as usize;
+        let cnt = $corpus.count();
+        let nth = $rand.below(cnt);
         $corpus.nth(nth)
     }};
 }
@@ -78,8 +78,8 @@ macro_rules! random_corpus_id {
 #[macro_export]
 macro_rules! random_corpus_id_with_disabled {
     ($corpus:expr, $rand:expr) => {{
-        let cnt = $corpus.count_all() as u64;
-        let nth = $rand.below(cnt) as usize;
+        let cnt = $corpus.count_all();
+        let nth = $rand.below(cnt);
         $corpus.nth_from_all(nth)
     }};
 }
@@ -109,11 +109,11 @@ pub trait Corpus: UsesInput + Serialize + for<'de> Deserialize<'de> {
     /// Replaces the [`Testcase`] at the given idx, returning the existing.
     fn replace(
         &mut self,
-        idx: CorpusId,
+        id: CorpusId,
         testcase: Testcase<Self::Input>,
     ) -> Result<Testcase<Self::Input>, Error>;
 
-    /// Removes an entry from the corpus, returning it if it was present.
+    /// Removes an entry from the corpus, returning it if it was present; considers both enabled and disabled testcases
     fn remove(&mut self, id: CorpusId) -> Result<Testcase<Self::Input>, Error>;
 
     /// Get by id; considers only enabled testcases
@@ -130,6 +130,9 @@ pub trait Corpus: UsesInput + Serialize + for<'de> Deserialize<'de> {
 
     /// Get the next corpus id
     fn next(&self, id: CorpusId) -> Option<CorpusId>;
+
+    /// Peek the next free corpus id
+    fn peek_free_id(&self) -> CorpusId;
 
     /// Get the prev corpus id
     fn prev(&self, id: CorpusId) -> Option<CorpusId>;
@@ -168,22 +171,22 @@ pub trait Corpus: UsesInput + Serialize + for<'de> Deserialize<'de> {
     fn store_input_from(&self, testcase: &Testcase<Self::Input>) -> Result<(), Error>;
 
     /// Loads the `Input` for a given [`CorpusId`] from the [`Corpus`], and returns the clone.
-    fn cloned_input_for_id(&self, idx: CorpusId) -> Result<Self::Input, Error> {
-        let mut testcase = self.get(idx)?.borrow_mut();
+    fn cloned_input_for_id(&self, id: CorpusId) -> Result<Self::Input, Error> {
+        let mut testcase = self.get(id)?.borrow_mut();
         Ok(testcase.load_input(self)?.clone())
     }
 }
 
 /// Trait for types which track the current corpus index
-pub trait HasCurrentCorpusIdx {
+pub trait HasCurrentCorpusId {
     /// Set the current corpus index; we have started processing this corpus entry
-    fn set_corpus_idx(&mut self, idx: CorpusId) -> Result<(), Error>;
+    fn set_corpus_id(&mut self, id: CorpusId) -> Result<(), Error>;
 
     /// Clear the current corpus index; we are done with this entry
-    fn clear_corpus_idx(&mut self) -> Result<(), Error>;
+    fn clear_corpus_id(&mut self) -> Result<(), Error>;
 
     /// Fetch the current corpus index -- typically used after a state recovery or transfer
-    fn current_corpus_idx(&self) -> Result<Option<CorpusId>, Error>;
+    fn current_corpus_id(&self) -> Result<Option<CorpusId>, Error>;
 }
 
 /// [`Iterator`] over the ids of a [`Corpus`]

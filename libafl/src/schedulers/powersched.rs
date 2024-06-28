@@ -1,12 +1,12 @@
 //! The queue corpus scheduler for power schedules.
 
-use alloc::{
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::vec::Vec;
 use core::{marker::PhantomData, time::Duration};
 
-use libafl_bolts::Named;
+use libafl_bolts::{
+    tuples::{Handle, Handled},
+    Named,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -65,10 +65,15 @@ impl SchedulerMetadata {
         }
     }
 
-    /// The powerschedule strategy
+    /// The `PowerSchedule`
     #[must_use]
     pub fn strat(&self) -> Option<PowerSchedule> {
         self.strat
+    }
+
+    /// Set the `PowerSchedule`
+    pub fn set_strat(&mut self, strat: Option<PowerSchedule>) {
+        self.strat = strat;
     }
 
     /// The measured exec time during calibration
@@ -173,9 +178,9 @@ pub enum PowerSchedule {
 #[derive(Clone, Debug)]
 pub struct PowerQueueScheduler<C, O, S> {
     strat: PowerSchedule,
-    map_observer_name: String,
+    map_observer_handle: Handle<C>,
     last_hash: usize,
-    phantom: PhantomData<(C, O, S)>,
+    phantom: PhantomData<(O, S)>,
 }
 
 impl<C, O, S> UsesState for PowerQueueScheduler<C, O, S>
@@ -195,7 +200,7 @@ where
     fn on_remove(
         &mut self,
         _state: &mut Self::State,
-        _idx: CorpusId,
+        _id: CorpusId,
         _prev: &Option<Testcase<<Self::State as UsesInput>::Input>>,
     ) -> Result<(), Error> {
         Ok(())
@@ -205,7 +210,7 @@ where
     fn on_replace(
         &mut self,
         _state: &mut Self::State,
-        _idx: CorpusId,
+        _id: CorpusId,
         _prev: &Testcase<<Self::State as UsesInput>::Input>,
     ) -> Result<(), Error> {
         Ok(())
@@ -226,8 +231,8 @@ where
         self.last_hash = hash;
     }
 
-    fn map_observer_name(&self) -> &str {
-        &self.map_observer_name
+    fn map_observer_handle(&self) -> &Handle<C> {
+        &self.map_observer_handle
     }
 }
 
@@ -238,8 +243,8 @@ where
     C: AsRef<O>,
 {
     /// Called when a [`Testcase`] is added to the corpus
-    fn on_add(&mut self, state: &mut Self::State, idx: CorpusId) -> Result<(), Error> {
-        self.on_add_metadata(state, idx)
+    fn on_add(&mut self, state: &mut Self::State, id: CorpusId) -> Result<(), Error> {
+        self.on_add_metadata(state, id)
     }
 
     fn on_evaluation<OT>(
@@ -256,9 +261,9 @@ where
 
     fn next(&mut self, state: &mut Self::State) -> Result<CorpusId, Error> {
         if state.corpus().count() == 0 {
-            Err(Error::empty(String::from(
+            Err(Error::empty(
                 "No entries in corpus. This often implies the target is not properly instrumented.",
-            )))
+            ))
         } else {
             let id = match state.corpus().current() {
                 Some(cur) => {
@@ -282,11 +287,11 @@ where
     fn set_current_scheduled(
         &mut self,
         state: &mut Self::State,
-        next_idx: Option<CorpusId>,
+        next_id: Option<CorpusId>,
     ) -> Result<(), Error> {
-        self.on_next_metadata(state, next_idx)?;
+        self.on_next_metadata(state, next_id)?;
 
-        *state.corpus_mut().current_mut() = next_idx;
+        *state.corpus_mut().current_mut() = next_id;
         Ok(())
     }
 }
@@ -305,7 +310,7 @@ where
         }
         PowerQueueScheduler {
             strat,
-            map_observer_name: map_observer.name().to_string(),
+            map_observer_handle: map_observer.handle(),
             last_hash: 0,
             phantom: PhantomData,
         }

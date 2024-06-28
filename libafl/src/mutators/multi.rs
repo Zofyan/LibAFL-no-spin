@@ -7,7 +7,7 @@ use libafl_bolts::{rands::Rand, Error};
 use crate::{
     corpus::{Corpus, CorpusId},
     impl_default_multipart,
-    inputs::{multi::MultipartInput, HasBytesVec, Input},
+    inputs::{multi::MultipartInput, HasMutatorBytes, Input},
     mutators::{
         mutations::{
             rand_range, BitFlipMutator, ByteAddMutator, ByteDecMutator, ByteFlipMutator,
@@ -44,14 +44,14 @@ where
         if input.parts().is_empty() {
             Ok(MutationResult::Skipped)
         } else {
-            let selected = state.rand_mut().below(input.parts().len() as u64) as usize;
+            let selected = state.rand_mut().below(input.parts().len());
             let mutated = input.part_mut(selected).unwrap();
             self.mutate(state, mutated)
         }
     }
 
-    fn post_exec(&mut self, state: &mut S, new_corpus_idx: Option<CorpusId>) -> Result<(), Error> {
-        M::post_exec(self, state, new_corpus_idx)
+    fn post_exec(&mut self, state: &mut S, new_corpus_id: Option<CorpusId>) -> Result<(), Error> {
+        M::post_exec(self, state, new_corpus_id)
     }
 }
 
@@ -117,7 +117,7 @@ impl_default_multipart!(
 impl<I, S> Mutator<MultipartInput<I>, S> for CrossoverInsertMutator<I>
 where
     S: HasCorpus<Input = MultipartInput<I>> + HasMaxSize + HasRand,
-    I: Input + HasBytesVec,
+    I: Input + HasMutatorBytes,
 {
     fn mutate(
         &mut self,
@@ -129,9 +129,9 @@ where
         let part_choice = state.rand_mut().next() as usize;
 
         // We special-case crossover with self
-        let idx = random_corpus_id!(state.corpus(), state.rand_mut());
+        let id = random_corpus_id!(state.corpus(), state.rand_mut());
         if let Some(cur) = state.corpus().current() {
-            if idx == *cur {
+            if id == *cur {
                 let choice = name_choice % input.names().len();
                 let name = input.names()[choice].clone();
 
@@ -150,10 +150,10 @@ where
                     .parts_by_name(&name)
                     .filter(|&(p, _)| p != choice)
                     .nth(part_choice % parts)
-                    .map(|(idx, part)| (idx, part.bytes().len()));
+                    .map(|(id, part)| (id, part.bytes().len()));
 
                 if let Some((part_idx, size)) = maybe_size {
-                    let target = state.rand_mut().below(size as u64) as usize;
+                    let target = state.rand_mut().below(size);
                     let range = rand_range(state, other_size, min(other_size, size - target));
 
                     let [part, chosen] = match part_idx.cmp(&choice) {
@@ -174,7 +174,7 @@ where
             }
         }
 
-        let mut other_testcase = state.corpus().get(idx)?.borrow_mut();
+        let mut other_testcase = state.corpus().get(id)?.borrow_mut();
         let other = other_testcase.load_input(state.corpus())?;
 
         let choice = name_choice % other.names().len();
@@ -195,10 +195,10 @@ where
             drop(other_testcase);
             let size = part.bytes().len();
 
-            let target = state.rand_mut().below(size as u64) as usize;
+            let target = state.rand_mut().below(size);
             let range = rand_range(state, other_size, min(other_size, size - target));
 
-            let other_testcase = state.corpus().get(idx)?.borrow_mut();
+            let other_testcase = state.corpus().get(id)?.borrow_mut();
             // No need to load the input again, it'll still be cached.
             let other = other_testcase.input().as_ref().unwrap();
 
@@ -221,7 +221,7 @@ where
 impl<I, S> Mutator<MultipartInput<I>, S> for CrossoverReplaceMutator<I>
 where
     S: HasCorpus<Input = MultipartInput<I>> + HasMaxSize + HasRand,
-    I: Input + HasBytesVec,
+    I: Input + HasMutatorBytes,
 {
     fn mutate(
         &mut self,
@@ -233,9 +233,9 @@ where
         let part_choice = state.rand_mut().next() as usize;
 
         // We special-case crossover with self
-        let idx = random_corpus_id!(state.corpus(), state.rand_mut());
+        let id = random_corpus_id!(state.corpus(), state.rand_mut());
         if let Some(cur) = state.corpus().current() {
-            if idx == *cur {
+            if id == *cur {
                 let choice = name_choice % input.names().len();
                 let name = input.names()[choice].clone();
 
@@ -254,10 +254,10 @@ where
                     .parts_by_name(&name)
                     .filter(|&(p, _)| p != choice)
                     .nth(part_choice % parts)
-                    .map(|(idx, part)| (idx, part.bytes().len()));
+                    .map(|(id, part)| (id, part.bytes().len()));
 
                 if let Some((part_idx, size)) = maybe_size {
-                    let target = state.rand_mut().below(size as u64) as usize;
+                    let target = state.rand_mut().below(size);
                     let range = rand_range(state, other_size, min(other_size, size - target));
 
                     let [part, chosen] = match part_idx.cmp(&choice) {
@@ -278,7 +278,7 @@ where
             }
         }
 
-        let mut other_testcase = state.corpus().get(idx)?.borrow_mut();
+        let mut other_testcase = state.corpus().get(id)?.borrow_mut();
         let other = other_testcase.load_input(state.corpus())?;
 
         let choice = name_choice % other.names().len();
@@ -299,10 +299,10 @@ where
             drop(other_testcase);
             let size = part.bytes().len();
 
-            let target = state.rand_mut().below(size as u64) as usize;
+            let target = state.rand_mut().below(size);
             let range = rand_range(state, other_size, min(other_size, size - target));
 
-            let other_testcase = state.corpus().get(idx)?.borrow_mut();
+            let other_testcase = state.corpus().get(id)?.borrow_mut();
             // No need to load the input again, it'll still be cached.
             let other = other_testcase.input().as_ref().unwrap();
 

@@ -29,16 +29,6 @@ wget https://github.com/glennrp/libpng/archive/refs/tags/v1.6.37.tar.gz
 tar -xvf v1.6.37.tar.gz
 '''
 
-# Compilers
-[tasks.cxx]
-linux_alias = "cxx_unix"
-mac_alias = "cxx_unix"
-windows_alias = "unsupported"
-
-[tasks.cxx_unix]
-command = "cargo"
-args = ["build" , "--profile", "${PROFILE}"]
-
 [tasks.cc]
 linux_alias = "cc_unix"
 mac_alias = "cc_unix"
@@ -61,7 +51,7 @@ cd libpng-1.6.37 && ./configure --enable-shared=no --with-pic=yes --enable-hardw
 cd "${PROJECT_DIR}"
 make -C libpng-1.6.37 CC="${CARGO_TARGET_DIR}/${PROFILE_DIR}/libafl_cc" CXX="${CARGO_TARGET_DIR}/${PROFILE_DIR}/libafl_cxx"
 '''
-dependencies = [ "libpng", "cxx", "cc" ]
+dependencies = [ "libpng", "cc" ]
 
 
 # Harness
@@ -73,7 +63,7 @@ windows_alias = "unsupported"
 [tasks.fuzzer_unix]
 command = "${CARGO_TARGET_DIR}/${PROFILE_DIR}/libafl_cxx"
 args = ["${PROJECT_DIR}/harness.cc", "${PROJECT_DIR}/libpng-1.6.37/.libs/libpng16.a", "-I", "${PROJECT_DIR}/libpng-1.6.37/", "-o", "${FUZZER_NAME}", "-lm", "-lz"]
-dependencies = [ "lib", "cxx", "cc" ]
+dependencies = [ "lib", "cc" ]
 
 # Run the fuzzer
 [tasks.run]
@@ -104,7 +94,7 @@ rm -rf libafl_unix_shmem_server || true
 rm -rf corpus/ || true
 mkdir corpus/ || true
 cp seeds/* corpus/ || true
-timeout 31s ./${FUZZER_NAME} --cores 0 --input ./corpus 2>/dev/null >fuzz_stdout.log || true
+timeout 31s ./${FUZZER_NAME} --cores 0 --input ./corpus 2>/dev/null | tee fuzz_stdout.log || true
 if grep -qa "corpus: 30" fuzz_stdout.log; then
     echo "Fuzzer is working"
 else

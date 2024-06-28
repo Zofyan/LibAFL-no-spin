@@ -1,4 +1,7 @@
-use alloc::rc::{Rc, Weak};
+use alloc::{
+    borrow::Cow,
+    rc::{Rc, Weak},
+};
 use std::{
     cell::RefCell,
     marker::PhantomData,
@@ -8,7 +11,7 @@ use std::{
 
 use libafl::{
     corpus::Corpus,
-    inputs::{BytesInput, HasBytesVec, UsesInput},
+    inputs::{BytesInput, HasMutatorBytes, UsesInput},
     mutators::{
         ComposedByMutations, MutationId, MutationResult, Mutator, MutatorsTuple, ScheduledMutator,
     },
@@ -279,8 +282,9 @@ where
 }
 
 impl<MT, SM> Named for LLVMCustomMutator<MT, SM, false> {
-    fn name(&self) -> &str {
-        "LLVMCustomMutator"
+    fn name(&self) -> &Cow<'static, str> {
+        static NAME: Cow<'static, str> = Cow::Borrowed("LLVMCustomMutator");
+        &NAME
     }
 }
 
@@ -347,14 +351,15 @@ where
             return result.replace(Ok(MutationResult::Skipped));
         }
         bytes.truncate(new_size);
-        core::mem::swap(input.bytes_mut(), &mut bytes);
+        input.bytes_mut().copy_from_slice(&bytes);
         Ok(MutationResult::Mutated)
     }
 }
 
 impl<MT, SM> Named for LLVMCustomMutator<MT, SM, true> {
-    fn name(&self) -> &str {
-        "LLVMCustomCrossover"
+    fn name(&self) -> &Cow<'static, str> {
+        static NAME: Cow<'static, str> = Cow::Borrowed("LLVMCustomCrossover");
+        &NAME
     }
 }
 
@@ -391,15 +396,15 @@ where
         state: &mut S,
         input: &mut S::Input,
     ) -> Result<MutationResult, Error> {
+        let id = random_corpus_id_with_disabled!(state.corpus(), state.rand_mut());
         // We don't want to use the testcase we're already using for splicing
-        let idx = random_corpus_id_with_disabled!(state.corpus(), state.rand_mut());
         if let Some(cur) = state.corpus().current() {
-            if idx == *cur {
+            if id == *cur {
                 return Ok(MutationResult::Skipped);
             }
         }
 
-        let mut other_testcase = state.corpus().get_from_all(idx)?.borrow_mut();
+        let mut other_testcase = state.corpus().get_from_all(id)?.borrow_mut();
         let other = other_testcase.load_input(state.corpus())?;
         let data2 = Vec::from(other.bytes());
         drop(other_testcase);
@@ -435,7 +440,7 @@ where
             return result.replace(Ok(MutationResult::Skipped));
         }
         out.truncate(new_size);
-        core::mem::swap(input.bytes_mut(), &mut out);
+        input.bytes_mut().copy_from_slice(&out);
         Ok(MutationResult::Mutated)
     }
 }
