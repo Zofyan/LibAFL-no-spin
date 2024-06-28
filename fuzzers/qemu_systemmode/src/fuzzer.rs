@@ -4,17 +4,8 @@ use core::{ptr::addr_of_mut, time::Duration};
 use std::{env, path::PathBuf, process};
 
 use libafl::{
-    bolts::{
-        core_affinity::Cores,
-        current_nanos,
-        launcher::Launcher,
-        rands::StdRand,
-        shmem::{ShMemProvider, StdShMemProvider},
-        tuples::tuple_list,
-        AsSlice,
-    },
     corpus::{Corpus, InMemoryCorpus, OnDiskCorpus},
-    events::EventConfig,
+    events::{launcher::Launcher, EventConfig},
     executors::{ExitKind, TimeoutExecutor},
     feedback_or, feedback_or_fast,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback, TimeoutFeedback},
@@ -28,6 +19,14 @@ use libafl::{
     state::{HasCorpus, StdState},
     Error,
 };
+use libafl_bolts::{
+    core_affinity::Cores,
+    current_nanos,
+    rands::StdRand,
+    shmem::{ShMemProvider, StdShMemProvider},
+    tuples::tuple_list,
+    AsSlice,
+};
 use libafl_qemu::{
     edges::{edges_map_mut_slice, QemuEdgeCoverageHelper, MAX_EDGES_NUM},
     elf::EasyElf,
@@ -38,6 +37,8 @@ use libafl_qemu::{
 pub static mut MAX_INPUT_SIZE: usize = 50;
 
 pub fn fuzz() {
+    env_logger::init();
+
     if let Ok(s) = env::var("FUZZ_SIZE") {
         str::parse::<usize>(&s).expect("FUZZ_SIZE was not a number");
     };
@@ -89,6 +90,9 @@ pub fn fuzz() {
         emu.remove_breakpoint(main_addr);
 
         emu.set_breakpoint(breakpoint); // BREAKPOINT
+
+        let devices = emu.list_devices();
+        println!("Devices = {:?}", devices);
 
         // let saved_cpu_states: Vec<_> = (0..emu.num_cpus())
         //     .map(|i| emu.cpu_from_index(i).save_state())
@@ -188,10 +192,10 @@ pub fn fuzz() {
         // A fuzzer with feedbacks and a corpus scheduler
         let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
 
-        let mut hooks = QemuHooks::new(&emu, tuple_list!(QemuEdgeCoverageHelper::default()));
+        let mut hooks = QemuHooks::new(emu.clone(), tuple_list!(QemuEdgeCoverageHelper::default()));
 
         // Create a QEMU in-process executor
-        let executor = QemuExecutor::new(
+        let mut executor = QemuExecutor::new(
             &mut hooks,
             &mut harness,
             tuple_list!(edges_observer, time_observer),
@@ -200,6 +204,9 @@ pub fn fuzz() {
             &mut mgr,
         )
         .expect("Failed to create QemuExecutor");
+
+        // Instead of calling the timeout handler and restart the process, trigger a breakpoint ASAP
+        executor.break_on_timeout();
 
         // Wrap the executor to keep track of the timeout
         let mut executor = TimeoutExecutor::new(executor, timeout);

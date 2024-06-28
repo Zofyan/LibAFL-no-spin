@@ -8,12 +8,10 @@ use std::{
     path::PathBuf,
 };
 
+use libafl_bolts::{current_time, format_duration_hms, ClientId};
 use serde_json::json;
 
-use crate::{
-    bolts::{current_time, format_duration_hms, ClientId},
-    monitors::{ClientStats, Monitor, NopMonitor},
-};
+use crate::monitors::{ClientStats, Monitor, NopMonitor};
 
 /// Wrap a monitor and log the current state of the monitor into a TOML file.
 #[derive(Debug, Clone)]
@@ -41,8 +39,13 @@ where
     }
 
     /// Time this fuzzing run stated
-    fn start_time(&mut self) -> Duration {
+    fn start_time(&self) -> Duration {
         self.base.start_time()
+    }
+
+    /// Set creation time
+    fn set_start_time(&mut self, time: Duration) {
+        self.base.set_start_time(time);
     }
 
     fn display(&mut self, event_msg: String, sender_id: ClientId) {
@@ -186,8 +189,12 @@ where
         self.base.client_stats()
     }
 
-    fn start_time(&mut self) -> Duration {
+    fn start_time(&self) -> Duration {
         self.base.start_time()
+    }
+
+    fn set_start_time(&mut self, time: Duration) {
+        self.base.set_start_time(time);
     }
 
     fn display(&mut self, event_msg: String, sender_id: ClientId) {

@@ -1,8 +1,8 @@
 /* ANCHOR: use */
 extern crate libafl;
+extern crate libafl_bolts;
 
 use libafl::{
-    bolts::{current_nanos, rands::StdRand, AsSlice},
     corpus::{InMemoryCorpus, OnDiskCorpus},
     events::SimpleEventManager,
     executors::{inprocess::InProcessExecutor, ExitKind},
@@ -13,6 +13,7 @@ use libafl::{
     schedulers::QueueScheduler,
     state::StdState,
 };
+use libafl_bolts::{current_nanos, rands::StdRand, AsSlice};
 use std::path::PathBuf;
 /* ANCHOR_END: use */
 
@@ -60,7 +61,7 @@ fn main() {
     /* ANCHOR_END: event_manager */
 
     /* ANCHOR: scheduler_fuzzer */
-    // A queue policy to get testcasess from the corpus
+    // A queue policy to get testcases from the corpus
     let scheduler = QueueScheduler::new();
 
     // A fuzzer with feedbacks and a corpus scheduler

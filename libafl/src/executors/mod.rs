@@ -35,18 +35,22 @@ use core::{fmt::Debug, marker::PhantomData};
 
 #[cfg(all(feature = "std", any(unix, doc)))]
 pub use command::CommandExecutor;
+use libafl_bolts::AsSlice;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    bolts::AsSlice,
-    inputs::{HasTargetBytes, UsesInput},
+    inputs::HasTargetBytes,
     observers::{ObserversTuple, UsesObservers},
-    state::UsesState,
+    state::{HasExecutions, State, UsesState},
     Error,
 };
 
 /// How an execution finished.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 pub enum ExitKind {
     /// The run exited normally.
     Ok,
@@ -69,6 +73,10 @@ pub enum ExitKind {
 
 /// How one of the diffing executions finished.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 pub enum DiffExitKind {
     /// The run exited normally.
     Ok,
@@ -84,7 +92,7 @@ pub enum DiffExitKind {
     // Custom(Box<dyn SerdeAny>),
 }
 
-crate::impl_serdeany!(ExitKind);
+libafl_bolts::impl_serdeany!(ExitKind);
 
 impl From<ExitKind> for DiffExitKind {
     fn from(exitkind: ExitKind) -> Self {
@@ -98,7 +106,7 @@ impl From<ExitKind> for DiffExitKind {
     }
 }
 
-crate::impl_serdeany!(DiffExitKind);
+libafl_bolts::impl_serdeany!(DiffExitKind);
 
 /// Holds a tuple of Observers
 pub trait HasObservers: UsesObservers {
@@ -110,7 +118,7 @@ pub trait HasObservers: UsesObservers {
 }
 
 /// An executor takes the given inputs, and runs the harness/target.
-pub trait Executor<EM, Z>: UsesState + Debug
+pub trait Executor<EM, Z>: UsesState
 where
     EM: UsesState<State = Self::State>,
     Z: UsesState<State = Self::State>,
@@ -150,7 +158,7 @@ struct NopExecutor<S> {
 
 impl<S> UsesState for NopExecutor<S>
 where
-    S: UsesInput,
+    S: State,
 {
     type State = S;
 }
@@ -158,17 +166,19 @@ where
 impl<EM, S, Z> Executor<EM, Z> for NopExecutor<S>
 where
     EM: UsesState<State = S>,
-    S: UsesInput + Debug,
+    S: State + HasExecutions,
     S::Input: HasTargetBytes,
     Z: UsesState<State = S>,
 {
     fn run_target(
         &mut self,
         _fuzzer: &mut Z,
-        _state: &mut Self::State,
+        state: &mut Self::State,
         _mgr: &mut EM,
         input: &Self::Input,
     ) -> Result<ExitKind, Error> {
+        *state.executions_mut() += 1;
+
         if input.target_bytes().as_slice().is_empty() {
             Err(Error::empty("Input Empty"))
         } else {
@@ -389,7 +399,7 @@ pub mod pybind {
 
     macro_rules! unwrap_me {
         ($wrapper:expr, $name:ident, $body:block) => {
-            crate::unwrap_me_body!($wrapper, $name, $body, PythonExecutorWrapper,
+            libafl_bolts::unwrap_me_body!($wrapper, $name, $body, PythonExecutorWrapper,
                 { InProcess },
                 {
                     Python(py_wrapper) => {
@@ -403,7 +413,7 @@ pub mod pybind {
 
     macro_rules! unwrap_me_mut {
         ($wrapper:expr, $name:ident, $body:block) => {
-            crate::unwrap_me_mut_body!($wrapper, $name, $body, PythonExecutorWrapper,
+            libafl_bolts::unwrap_me_mut_body!($wrapper, $name, $body, PythonExecutorWrapper,
                 { InProcess },
                 {
                     Python(py_wrapper) => {

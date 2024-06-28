@@ -8,11 +8,15 @@ use alloc::{borrow::ToOwned, string::ToString, vec::Vec};
 use core::marker::PhantomData;
 
 use super::{Stage, TracingStage};
+#[cfg(all(feature = "introspection", feature = "concolic_mutation"))]
+use crate::state::HasClientPerfMonitor;
+#[cfg(feature = "concolic_mutation")]
+use crate::state::State;
 use crate::{
     corpus::{Corpus, CorpusId},
     executors::{Executor, HasObservers},
     observers::concolic::ConcolicObserver,
-    state::{HasClientPerfMonitor, HasCorpus, HasExecutions, HasMetadata},
+    state::{HasCorpus, HasExecutions, HasMetadata},
     Error,
 };
 
@@ -35,7 +39,7 @@ where
     E: UsesState<State = TE::State>,
     EM: UsesState<State = TE::State>,
     TE: Executor<EM, Z> + HasObservers,
-    TE::State: HasClientPerfMonitor + HasExecutions + HasCorpus,
+    TE::State: HasExecutions + HasCorpus,
     Z: UsesState<State = TE::State>,
 {
     #[inline]
@@ -78,9 +82,11 @@ impl<EM, TE, Z> ConcolicTracingStage<EM, TE, Z> {
     }
 }
 
+use libafl_bolts::tuples::MatchName;
+
 #[cfg(all(feature = "concolic_mutation", feature = "introspection"))]
 use crate::monitors::PerfFeature;
-use crate::{bolts::tuples::MatchName, state::UsesState};
+use crate::state::UsesState;
 #[cfg(feature = "concolic_mutation")]
 use crate::{
     inputs::HasBytesVec,
@@ -352,7 +358,7 @@ where
     EM: UsesState<State = Z::State>,
     Z: Evaluator<E, EM>,
     Z::Input: HasBytesVec,
-    Z::State: HasClientPerfMonitor + HasExecutions + HasCorpus,
+    Z::State: State + HasExecutions + HasCorpus,
 {
     #[inline]
     fn perform(

@@ -6,10 +6,9 @@ use alloc::{
 };
 use core::{fmt::Debug, marker::PhantomData};
 
-#[cfg(feature = "introspection")]
-use crate::monitors::PerfFeature;
+use libafl_bolts::AsSlice;
+
 use crate::{
-    bolts::AsSlice,
     corpus::{Corpus, CorpusId},
     executors::{Executor, HasObservers},
     feedbacks::map::MapNoveltiesMetadata,
@@ -18,13 +17,15 @@ use crate::{
     observers::{MapObserver, ObserversTuple},
     stages::Stage,
     start_timer,
-    state::{HasClientPerfMonitor, HasCorpus, HasExecutions, HasMetadata, UsesState},
+    state::{HasCorpus, HasExecutions, HasMetadata, UsesState},
     Error,
 };
+#[cfg(feature = "introspection")]
+use crate::{monitors::PerfFeature, state::HasClientPerfMonitor};
 
 const MAX_GENERALIZED_LEN: usize = 8192;
 
-fn increment_by_offset(_list: &[Option<u8>], idx: usize, off: u8) -> usize {
+const fn increment_by_offset(_list: &[Option<u8>], idx: usize, off: u8) -> usize {
     idx + 1 + off as usize
 }
 
@@ -59,11 +60,7 @@ where
     O: MapObserver,
     E: Executor<EM, Z> + HasObservers,
     E::Observers: ObserversTuple<E::State>,
-    E::State: UsesInput<Input = BytesInput>
-        + HasClientPerfMonitor
-        + HasExecutions
-        + HasMetadata
-        + HasCorpus,
+    E::State: UsesInput<Input = BytesInput> + HasExecutions + HasMetadata + HasCorpus,
     EM: UsesState<State = E::State>,
     Z: UsesState<State = E::State>,
 {
@@ -99,6 +96,9 @@ where
                         "MapNoveltiesMetadata needed for GeneralizationStage not found in testcase #{corpus_idx} (check the arguments of MapFeedback::new(...))"
                     ))
                 })?;
+            if meta.as_slice().is_empty() {
+                return Ok(()); // don't generalise inputs which don't have novelties
+            }
             (payload, original, meta.as_slice().to_vec())
         };
 
@@ -312,11 +312,7 @@ where
     EM: UsesState,
     O: MapObserver,
     OT: ObserversTuple<EM::State>,
-    EM::State: UsesInput<Input = BytesInput>
-        + HasClientPerfMonitor
-        + HasExecutions
-        + HasMetadata
-        + HasCorpus,
+    EM::State: UsesInput<Input = BytesInput> + HasExecutions + HasMetadata + HasCorpus,
 {
     /// Create a new [`GeneralizationStage`].
     #[must_use]

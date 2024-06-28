@@ -9,13 +9,6 @@ use std::{
 
 use clap::{Arg, ArgAction, Command};
 use libafl::{
-    bolts::{
-        current_nanos, current_time,
-        rands::StdRand,
-        shmem::{ShMem, ShMemProvider, UnixShMemProvider},
-        tuples::{tuple_list, Merge},
-        AsMutSlice,
-    },
     corpus::{Corpus, InMemoryOnDiskCorpus, OnDiskCorpus},
     events::SimpleEventManager,
     executors::forkserver::{ForkserverExecutor, TimeoutForkserverExecutor},
@@ -28,7 +21,7 @@ use libafl::{
         scheduled::havoc_mutations, token_mutations::I2SRandReplace, tokens_mutations,
         StdMOptMutator, StdScheduledMutator, Tokens,
     },
-    observers::{AFLppCmpMap, HitcountsMapObserver, StdCmpObserver, StdMapObserver, TimeObserver},
+    observers::{HitcountsMapObserver, StdCmpValuesObserver, StdMapObserver, TimeObserver},
     schedulers::{
         powersched::PowerSchedule, IndexesLenTimeMinimizerScheduler, StdWeightedScheduler,
     },
@@ -39,6 +32,14 @@ use libafl::{
     state::{HasCorpus, HasMetadata, StdState},
     Error,
 };
+use libafl_bolts::{
+    current_nanos, current_time,
+    rands::StdRand,
+    shmem::{ShMem, ShMemProvider, UnixShMemProvider},
+    tuples::{tuple_list, Merge},
+    AsMutSlice,
+};
+use libafl_targets::cmps::AFLppCmpLogMap;
 use nix::sys::signal::Signal;
 
 pub fn main() {
@@ -340,13 +341,13 @@ fn fuzz(
     if let Some(exec) = &cmplog_exec {
         // The cmplog map shared between observer and executor
         let mut cmplog_shmem = shmem_provider
-            .new_shmem(core::mem::size_of::<AFLppCmpMap>())
+            .new_shmem(core::mem::size_of::<AFLppCmpLogMap>())
             .unwrap();
         // let the forkserver know the shmid
         cmplog_shmem.write_to_env("__AFL_CMPLOG_SHM_ID").unwrap();
-        let cmpmap = unsafe { cmplog_shmem.as_object_mut::<AFLppCmpMap>() };
+        let cmpmap = unsafe { cmplog_shmem.as_object_mut::<AFLppCmpLogMap>() };
 
-        let cmplog_observer = StdCmpObserver::new("cmplog", cmpmap, true);
+        let cmplog_observer = StdCmpValuesObserver::new("cmplog", cmpmap, true);
 
         let cmplog_forkserver = ForkserverExecutor::builder()
             .program(exec)

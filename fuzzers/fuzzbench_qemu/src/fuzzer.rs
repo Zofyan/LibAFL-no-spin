@@ -13,14 +13,6 @@ use std::{
 
 use clap::{Arg, Command};
 use libafl::{
-    bolts::{
-        current_nanos, current_time,
-        os::dup2,
-        rands::StdRand,
-        shmem::{ShMemProvider, StdShMemProvider},
-        tuples::{tuple_list, Merge},
-        AsSlice,
-    },
     corpus::{Corpus, InMemoryOnDiskCorpus, OnDiskCorpus},
     events::SimpleRestartingEventManager,
     executors::{ExitKind, ShadowExecutor, TimeoutExecutor},
@@ -44,16 +36,25 @@ use libafl::{
     state::{HasCorpus, HasMetadata, StdState},
     Error,
 };
+use libafl_bolts::{
+    current_nanos, current_time,
+    os::dup2,
+    rands::StdRand,
+    shmem::{ShMemProvider, StdShMemProvider},
+    tuples::{tuple_list, Merge},
+    AsSlice,
+};
 use libafl_qemu::{
+    // asan::{init_with_asan, QemuAsanHelper},
     cmplog::{CmpLogObserver, QemuCmpLogHelper},
-    //asan::{init_with_asan, QemuAsanHelper},
     edges::edges_map_mut_slice,
     edges::QemuEdgeCoverageHelper,
     edges::MAX_EDGES_NUM,
     elf::EasyElf,
-    emu::Emulator,
     filter_qemu_args,
     hooks::QemuHooks,
+    Emulator,
+    GuestReg,
     //snapshot::QemuSnapshotHelper,
     MmapPerms,
     QemuExecutor,
@@ -68,7 +69,7 @@ pub const MAX_INPUT_SIZE: usize = 1048576; // 1MB
 pub fn main() {
     // Registry the metadata types used in this fuzzer
     // Needed only on no_std
-    //RegistryBuilder::register::<Tokens>();
+    // unsafe { RegistryBuilder::register::<Tokens>(); }
 
     let res = match Command::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))
@@ -172,7 +173,7 @@ fn fuzz(
     let args: Vec<String> = env::args().collect();
     let env: Vec<(String, String)> = env::vars().collect();
     let emu = Emulator::new(&args, &env).unwrap();
-    //let emu = init_with_asan(&mut args, &mut env);
+    // let (emu, asan) = init_with_asan(&mut args, &mut env).unwrap();
 
     let mut elf_buffer = Vec::new();
     let elf = EasyElf::from_file(emu.binary_path(), &mut elf_buffer)?;
@@ -330,7 +331,7 @@ fn fuzz(
             emu.write_mem(input_addr, buf);
 
             emu.write_reg(Regs::Rdi, input_addr).unwrap();
-            emu.write_reg(Regs::Rsi, len).unwrap();
+            emu.write_reg(Regs::Rsi, len as GuestReg).unwrap();
             emu.write_reg(Regs::Rip, test_one_input_ptr).unwrap();
             emu.write_reg(Regs::Rsp, stack_ptr).unwrap();
 
@@ -341,11 +342,11 @@ fn fuzz(
     };
 
     let mut hooks = QemuHooks::new(
-        &emu,
+        emu.clone(),
         tuple_list!(
             QemuEdgeCoverageHelper::default(),
             QemuCmpLogHelper::default(),
-            //QemuAsanHelper::default(),
+            // QemuAsanHelper::default(asan),
             //QemuSnapshotHelper::new()
         ),
     );

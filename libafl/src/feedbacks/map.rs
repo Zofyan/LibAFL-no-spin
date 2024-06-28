@@ -5,26 +5,26 @@ use alloc::{
     vec::Vec,
 };
 #[rustversion::nightly]
-use core::simd::SimdOrd;
+use core::simd::cmp::SimdOrd;
 use core::{
     fmt::Debug,
     marker::PhantomData,
     ops::{BitAnd, BitOr},
 };
 
+use libafl_bolts::{AsIter, AsMutSlice, AsSlice, HasRefCnt, Named};
 use num_traits::PrimInt;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::{
-    bolts::{tuples::Named, AsIter, AsMutSlice, AsSlice, HasRefCnt},
     corpus::Testcase,
     events::{Event, EventFirer},
     executors::ExitKind,
     feedbacks::{Feedback, HasObserverName},
     inputs::UsesInput,
-    monitors::UserStats,
+    monitors::{AggregatorOps, UserStats, UserStatsValue},
     observers::{MapObserver, Observer, ObserversTuple, UsesObserver},
-    state::{HasClientPerfMonitor, HasMetadata, HasNamedMetadata},
+    state::{HasMetadata, HasNamedMetadata, State},
     Error,
 };
 
@@ -50,7 +50,7 @@ pub type MaxMapPow2Feedback<O, S, T> = MapFeedback<NextPow2IsNovel, O, MaxReduce
 pub type MaxMapOneOrFilledFeedback<O, S, T> = MapFeedback<OneOrFilledIsNovel, O, MaxReducer, S, T>;
 
 /// A `Reducer` function is used to aggregate values for the novelty search
-pub trait Reducer<T>: 'static + Debug
+pub trait Reducer<T>: 'static
 where
     T: Default + Copy + 'static,
 {
@@ -137,7 +137,7 @@ where
 }
 
 /// A `IsNovel` function is used to discriminate if a reduced value is considered novel.
-pub trait IsNovel<T>: 'static + Debug
+pub trait IsNovel<T>: 'static
 where
     T: Default + Copy + 'static,
 {
@@ -207,7 +207,7 @@ where
     }
 }
 
-/// A filter that only saves values which are at least the next pow2 class
+/// Only consider `T::one()` or `T::max_value()`, if they are bigger than the old value, as novel
 #[derive(Clone, Debug)]
 pub struct OneOrFilledIsNovel {}
 impl<T> IsNovel<T> for OneOrFilledIsNovel
@@ -222,6 +222,10 @@ where
 
 /// A testcase metadata holding a list of indexes of a map
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 pub struct MapIndexesMetadata {
     /// The list of indexes.
     pub list: Vec<usize>,
@@ -229,7 +233,7 @@ pub struct MapIndexesMetadata {
     pub tcref: isize,
 }
 
-crate::impl_serdeany!(MapIndexesMetadata);
+libafl_bolts::impl_serdeany!(MapIndexesMetadata);
 
 impl AsSlice for MapIndexesMetadata {
     type Entry = usize;
@@ -266,12 +270,16 @@ impl MapIndexesMetadata {
 
 /// A testcase metadata holding a list of indexes of a map
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 pub struct MapNoveltiesMetadata {
     /// A `list` of novelties.
     pub list: Vec<usize>,
 }
 
-crate::impl_serdeany!(MapNoveltiesMetadata);
+libafl_bolts::impl_serdeany!(MapNoveltiesMetadata);
 
 impl AsSlice for MapNoveltiesMetadata {
     type Entry = usize;
@@ -300,6 +308,10 @@ impl MapNoveltiesMetadata {
 /// The state of [`MapFeedback`]
 #[derive(Default, Serialize, Deserialize, Clone, Debug)]
 #[serde(bound = "T: DeserializeOwned")]
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 pub struct MapFeedbackMetadata<T>
 where
     T: Default + Copy + 'static + Serialize,
@@ -308,9 +320,9 @@ where
     pub history_map: Vec<T>,
 }
 
-crate::impl_serdeany!(
+libafl_bolts::impl_serdeany!(
     MapFeedbackMetadata<T: Debug + Default + Copy + 'static + Serialize + DeserializeOwned>,
-    <u8>,<u16>,<u32>,<u64>,<i8>,<i16>,<i32>,<i64>,<f32>,<f64>,<bool>,<char>
+    <u8>,<u16>,<u32>,<u64>,<i8>,<i16>,<i32>,<i64>,<f32>,<f64>,<bool>,<char>,<usize>
 );
 
 impl<T> MapFeedbackMetadata<T>
@@ -380,10 +392,10 @@ where
 
 impl<N, O, R, S, T> Feedback<S> for MapFeedback<N, O, R, S, T>
 where
-    N: IsNovel<T> + Debug,
+    N: IsNovel<T>,
     O: MapObserver<Entry = T> + for<'it> AsIter<'it, Item = T>,
-    R: Reducer<T> + Debug,
-    S: UsesInput + HasClientPerfMonitor + HasNamedMetadata + Debug,
+    R: Reducer<T>,
+    S: State + HasNamedMetadata,
     T: Default + Copy + Serialize + for<'de> Deserialize<'de> + PartialEq + Debug + 'static,
 {
     fn init_state(&mut self, state: &mut S) -> Result<(), Error> {
@@ -444,6 +456,10 @@ where
             .named_metadata_map_mut()
             .get_mut::<MapFeedbackMetadata<T>>(&self.name)
             .unwrap();
+        let len = observer.len();
+        if map_state.history_map.len() < len {
+            map_state.history_map.resize(len, observer.initial());
+        }
 
         let history_map = map_state.history_map.as_mut_slice();
         if self.indexes {
@@ -480,7 +496,7 @@ impl<O, S> Feedback<S> for MapFeedback<DifferentIsNovel, O, MaxReducer, S, u8>
 where
     O: MapObserver<Entry = u8> + AsSlice<Entry = u8>,
     for<'it> O: AsIter<'it, Item = u8>,
-    S: UsesInput + HasNamedMetadata + HasClientPerfMonitor + Debug,
+    S: State + HasNamedMetadata,
 {
     #[allow(clippy::wrong_self_convention)]
     #[allow(clippy::needless_range_loop)]
@@ -531,20 +547,20 @@ where
             }
         }*/
 
-        let steps = size / VectorType::LANES;
-        let left = size % VectorType::LANES;
+        let steps = size / VectorType::LEN;
+        let left = size % VectorType::LEN;
 
         if let Some(novelties) = self.novelties.as_mut() {
             novelties.clear();
             for step in 0..steps {
-                let i = step * VectorType::LANES;
+                let i = step * VectorType::LEN;
                 let history = VectorType::from_slice(&history_map[i..]);
                 let items = VectorType::from_slice(&map[i..]);
 
                 if items.simd_max(history) != history {
                     interesting = true;
                     unsafe {
-                        for j in i..(i + VectorType::LANES) {
+                        for j in i..(i + VectorType::LEN) {
                             let item = *map.get_unchecked(j);
                             if item > *history_map.get_unchecked(j) {
                                 novelties.push(j);
@@ -565,7 +581,7 @@ where
             }
         } else {
             for step in 0..steps {
-                let i = step * VectorType::LANES;
+                let i = step * VectorType::LEN;
                 let history = VectorType::from_slice(&history_map[i..]);
                 let items = VectorType::from_slice(&map[i..]);
 
@@ -599,12 +615,15 @@ where
                 state,
                 Event::UpdateUserStats {
                     name: self.stats_name.to_string(),
-                    value: UserStats::Ratio(
-                        self.novelties
-                            .as_ref()
-                            .map_or(filled, |novelties| filled + novelties.len())
-                            as u64,
-                        len as u64,
+                    value: UserStats::new(
+                        UserStatsValue::Ratio(
+                            self.novelties
+                                .as_ref()
+                                .map_or(filled, |novelties| filled + novelties.len())
+                                as u64,
+                            len as u64,
+                        ),
+                        AggregatorOps::Avg,
                     ),
                     phantom: PhantomData,
                 },
@@ -648,7 +667,7 @@ where
     O: MapObserver<Entry = T>,
     for<'it> O: AsIter<'it, Item = T>,
     N: IsNovel<T>,
-    S: UsesInput + HasNamedMetadata + HasClientPerfMonitor + Debug,
+    S: UsesInput + HasNamedMetadata,
 {
     /// Create new `MapFeedback`
     #[must_use]
@@ -807,12 +826,15 @@ where
                 state,
                 Event::UpdateUserStats {
                     name: self.stats_name.to_string(),
-                    value: UserStats::Ratio(
-                        self.novelties
-                            .as_ref()
-                            .map_or(filled, |novelties| filled + novelties.len())
-                            as u64,
-                        len as u64,
+                    value: UserStats::new(
+                        UserStatsValue::Ratio(
+                            self.novelties
+                                .as_ref()
+                                .map_or(filled, |novelties| filled + novelties.len())
+                                as u64,
+                            len as u64,
+                        ),
+                        AggregatorOps::Avg,
                     ),
                     phantom: PhantomData,
                 },
@@ -859,7 +881,7 @@ where
 
 impl<O, S> Feedback<S> for ReachabilityFeedback<O, S>
 where
-    S: UsesInput + Debug + HasClientPerfMonitor,
+    S: State,
     O: MapObserver<Entry = usize>,
     for<'it> O: AsIter<'it, Item = usize>,
 {

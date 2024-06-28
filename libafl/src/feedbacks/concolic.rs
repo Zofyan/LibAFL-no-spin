@@ -6,15 +6,16 @@
 use alloc::{borrow::ToOwned, string::String};
 use core::{fmt::Debug, marker::PhantomData};
 
+use libafl_bolts::Named;
+
 use crate::{
-    bolts::tuples::Named,
     corpus::Testcase,
     events::EventFirer,
     executors::ExitKind,
     feedbacks::Feedback,
     inputs::UsesInput,
     observers::{concolic::ConcolicObserver, ObserversTuple},
-    state::{HasClientPerfMonitor, HasMetadata},
+    state::{HasMetadata, State},
     Error,
 };
 
@@ -48,7 +49,7 @@ impl<S> Named for ConcolicFeedback<S> {
 
 impl<S> Feedback<S> for ConcolicFeedback<S>
 where
-    S: UsesInput + Debug + HasClientPerfMonitor,
+    S: State,
 {
     #[allow(clippy::wrong_self_convention)]
     fn is_interesting<EM, OT>(

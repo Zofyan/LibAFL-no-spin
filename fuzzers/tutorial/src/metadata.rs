@@ -1,15 +1,14 @@
 use libafl::{
-    bolts::tuples::Named,
     corpus::Testcase,
     events::EventFirer,
     executors::ExitKind,
     feedbacks::{Feedback, MapIndexesMetadata},
-    inputs::UsesInput,
     observers::ObserversTuple,
     schedulers::{MinimizerScheduler, TestcaseScore},
-    state::{HasClientPerfMonitor, HasCorpus, HasMetadata},
-    Error, SerdeAny,
+    state::{HasCorpus, HasMetadata, State},
+    Error,
 };
+use libafl_bolts::{Named, SerdeAny};
 use serde::{Deserialize, Serialize};
 
 use crate::input::PacketData;
@@ -43,7 +42,7 @@ pub struct PacketLenFeedback {
 
 impl<S> Feedback<S> for PacketLenFeedback
 where
-    S: UsesInput<Input = PacketData> + HasClientPerfMonitor,
+    S: State<Input = PacketData>,
 {
     #[inline]
     fn is_interesting<EM, OT>(

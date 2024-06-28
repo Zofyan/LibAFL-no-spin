@@ -8,7 +8,7 @@ use which::which;
 
 const QEMU_URL: &str = "https://github.com/AFLplusplus/qemu-libafl-bridge";
 const QEMU_DIRNAME: &str = "qemu-libafl-bridge";
-const QEMU_REVISION: &str = "0dc52ed6f3915f727aaec8648706760f278f0571";
+const QEMU_REVISION: &str = "32206d23c33a55c9e519e4ae67038ab27d713a24";
 
 fn build_dep_check(tools: &[&str]) {
     for tool in tools {
@@ -16,7 +16,7 @@ fn build_dep_check(tools: &[&str]) {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
 #[must_use]
 pub fn build(
     cpu_target: &str,
@@ -43,9 +43,9 @@ pub fn build(
         cpu_target += "el";
     }
 
-    let custum_qemu_dir = env::var_os("CUSTOM_QEMU_DIR").map(|x| x.to_string_lossy().to_string());
-    let custum_qemu_no_build = env::var("CUSTOM_QEMU_NO_BUILD").is_ok();
-    let custum_qemu_no_configure = env::var("CUSTOM_QEMU_NO_CONFIGURE").is_ok();
+    let custom_qemu_dir = env::var_os("CUSTOM_QEMU_DIR").map(|x| x.to_string_lossy().to_string());
+    let custom_qemu_no_build = env::var("CUSTOM_QEMU_NO_BUILD").is_ok();
+    let custom_qemu_no_configure = env::var("CUSTOM_QEMU_NO_CONFIGURE").is_ok();
     println!("cargo:rerun-if-env-changed=CUSTOM_QEMU_DIR");
     println!("cargo:rerun-if-env-changed=CUSTOM_QEMU_NO_BUILD");
     println!("cargo:rerun-if-env-changed=CUSTOM_QEMU_NO_CONFIGURE");
@@ -60,7 +60,10 @@ pub fn build(
 
     build_dep_check(&["git", "make"]);
 
-    let qemu_path = if let Some(qemu_dir) = custum_qemu_dir.as_ref() {
+    let cc_compiler = cc::Build::new().cpp(false).get_compiler();
+    let cpp_compiler = cc::Build::new().cpp(true).get_compiler();
+
+    let qemu_path = if let Some(qemu_dir) = custom_qemu_dir.as_ref() {
         Path::new(&qemu_dir).to_path_buf()
     } else {
         let qemu_path = target_dir.join(QEMU_DIRNAME);
@@ -125,17 +128,28 @@ pub fn build(
 
     println!("cargo:rerun-if-changed={}", output_lib.to_string_lossy());
 
-    if !output_lib.is_file() || (custum_qemu_dir.is_some() && !custum_qemu_no_build) {
+    if !output_lib.is_file() || (custom_qemu_dir.is_some() && !custom_qemu_no_build) {
         /*drop(
             Command::new("make")
                 .current_dir(&qemu_path)
                 .arg("distclean")
                 .status(),
         );*/
-        if is_usermode && !custum_qemu_no_configure {
+        if is_usermode && !custom_qemu_no_configure {
             let mut cmd = Command::new("./configure");
             cmd.current_dir(&qemu_path)
                 //.arg("--as-static-lib")
+                .env("__LIBAFL_QEMU_BUILD_OUT", build_dir.join("linkinfo.json"))
+                .env("__LIBAFL_QEMU_BUILD_CC", cc_compiler.path())
+                .env("__LIBAFL_QEMU_BUILD_CXX", cpp_compiler.path())
+                .arg(&format!(
+                    "--cc={}",
+                    qemu_path.join("linker_interceptor.py").display()
+                ))
+                .arg(&format!(
+                    "--cxx={}",
+                    qemu_path.join("linker_interceptor++.py").display()
+                ))
                 .arg("--as-shared-lib")
                 .arg(&format!("--target-list={cpu_target}-{target_suffix}"))
                 .args([
@@ -148,10 +162,21 @@ pub fn build(
                 cmd.arg("--enable-debug");
             }
             cmd.status().expect("Configure failed");
-        } else if !custum_qemu_no_configure {
+        } else if !custom_qemu_no_configure {
             let mut cmd = Command::new("./configure");
             cmd.current_dir(&qemu_path)
                 //.arg("--as-static-lib")
+                .env("__LIBAFL_QEMU_BUILD_OUT", build_dir.join("linkinfo.json"))
+                .env("__LIBAFL_QEMU_BUILD_CC", cc_compiler.path())
+                .env("__LIBAFL_QEMU_BUILD_CXX", cpp_compiler.path())
+                .arg(&format!(
+                    "--cc={}",
+                    qemu_path.join("linker_interceptor.py").display()
+                ))
+                .arg(&format!(
+                    "--cxx={}",
+                    qemu_path.join("linker_interceptor++.py").display()
+                ))
                 .arg("--as-shared-lib")
                 .arg(&format!("--target-list={cpu_target}-{target_suffix}"))
                 .arg(if cfg!(feature = "slirp") {
@@ -191,7 +216,6 @@ pub fn build(
                 .arg("--disable-gtk")
                 .arg("--disable-guest-agent")
                 .arg("--disable-guest-agent-msi")
-                .arg("--disable-hax")
                 .arg("--disable-hvf")
                 .arg("--disable-iconv")
                 .arg("--disable-jack")
@@ -266,7 +290,8 @@ pub fn build(
                 .arg("--disable-xen")
                 .arg("--disable-xen-pci-passthrough")
                 .arg("--disable-xkbcommon")
-                .arg("--disable-zstd");
+                .arg("--disable-zstd")
+                .arg("--disable-tests");
             if cfg!(feature = "debug_assertions") {
                 cmd.arg("--enable-debug");
             }
@@ -277,6 +302,7 @@ pub fn build(
                 .current_dir(&build_dir)
                 .arg("-j")
                 .arg(&format!("{j}"))
+                .env("V", "1")
                 .status()
                 .expect("Make failed");
         } else {
@@ -288,6 +314,7 @@ pub fn build(
         }
     }
 
+    /*
     let mut objects = vec![];
     for dir in &[
         build_dir.join("libcommon.fa.p"),
@@ -308,7 +335,33 @@ pub fn build(
             }
         }
     }
+    */
 
+    let compile_commands_string =
+        &fs::read_to_string(build_dir.join("linkinfo.json")).expect("Failed to read linkinfo.json");
+
+    let linkinfo = json::parse(compile_commands_string).expect("Failed to parse linkinfo.json");
+
+    let mut cmd = vec![];
+    for arg in linkinfo["cmd"].members() {
+        cmd.push(
+            arg.as_str()
+                .expect("linkinfo.json `cmd` values must be strings"),
+        );
+    }
+
+    assert!(cpp_compiler
+        .to_command()
+        .current_dir(&build_dir)
+        .arg("-o")
+        .arg("libqemu-partially-linked.o")
+        .arg("-r")
+        .args(cmd)
+        .status()
+        .expect("Partial linked failure")
+        .success());
+
+    /* // Old manual linking, kept here for reference and debugging
     if is_usermode {
         Command::new("ld")
             .current_dir(out_dir_path)
@@ -321,10 +374,12 @@ pub fn build(
             .arg(format!("{}/libhwcore.fa", build_dir.display()))
             .arg(format!("{}/libqom.fa", build_dir.display()))
             .arg(format!("{}/libevent-loop-base.a", build_dir.display()))
+            .arg(format!("{}/gdbstub/libgdb_user.fa", build_dir.display()))
             .arg("--no-whole-archive")
             .arg(format!("{}/libqemuutil.a", build_dir.display()))
             .arg(format!("{}/libhwcore.fa", build_dir.display()))
             .arg(format!("{}/libqom.fa", build_dir.display()))
+            .arg(format!("{}/gdbstub/libgdb_user.fa", build_dir.display()))
             .arg(format!(
                 "--dynamic-list={}/plugins/qemu-plugins.symbols",
                 qemu_path.display()
@@ -344,6 +399,7 @@ pub fn build(
             .arg(format!("{}/libhwcore.fa", build_dir.display()))
             .arg(format!("{}/libqom.fa", build_dir.display()))
             .arg(format!("{}/libevent-loop-base.a", build_dir.display()))
+            .arg(format!("{}/gdbstub/libgdb_softmmu.fa", build_dir.display()))
             .arg(format!("{}/libio.fa", build_dir.display()))
             .arg(format!("{}/libcrypto.fa", build_dir.display()))
             .arg(format!("{}/libauthz.fa", build_dir.display()))
@@ -353,6 +409,10 @@ pub fn build(
             .arg(format!("{}/libqmp.fa", build_dir.display()))
             .arg("--no-whole-archive")
             .arg(format!("{}/libqemuutil.a", build_dir.display()))
+            .arg(format!(
+                "{}/subprojects/dtc/libfdt/libfdt.a",
+                build_dir.display()
+            ))
             .arg(format!(
                 "{}/subprojects/libvhost-user/libvhost-user-glib.a",
                 build_dir.display()
@@ -365,10 +425,10 @@ pub fn build(
                 "{}/subprojects/libvduse/libvduse.a",
                 build_dir.display()
             ))
-            .arg(format!("{}/libfdt.a", build_dir.display()))
             .arg(format!("{}/libmigration.fa", build_dir.display()))
             .arg(format!("{}/libhwcore.fa", build_dir.display()))
             .arg(format!("{}/libqom.fa", build_dir.display()))
+            .arg(format!("{}/gdbstub/libgdb_softmmu.fa", build_dir.display()))
             .arg(format!("{}/libio.fa", build_dir.display()))
             .arg(format!("{}/libcrypto.fa", build_dir.display()))
             .arg(format!("{}/libauthz.fa", build_dir.display()))
@@ -383,18 +443,34 @@ pub fn build(
             .arg("--end-group")
             .status()
             .expect("Partial linked failure");
-    }
+    }*/
 
     Command::new("ar")
         .current_dir(out_dir_path)
         .arg("crs")
         .arg("libqemu-partially-linked.a")
-        .arg("libqemu-partially-linked.o")
+        .arg(build_dir.join("libqemu-partially-linked.o"))
         .status()
         .expect("Ar creation");
 
     println!("cargo:rustc-link-search=native={out_dir}");
     println!("cargo:rustc-link-lib=static=qemu-partially-linked");
+
+    for arg in linkinfo["search"].members() {
+        let val = arg
+            .as_str()
+            .expect("linkinfo.json `search` values must be strings");
+        println!("cargo:rustc-link-search={val}");
+    }
+
+    for arg in linkinfo["libs"].members() {
+        let val = arg
+            .as_str()
+            .expect("linkinfo.json `libs` values must be strings");
+        println!("cargo:rustc-link-lib={val}");
+    }
+
+    /*
     println!("cargo:rustc-link-lib=rt");
     println!("cargo:rustc-link-lib=gmodule-2.0");
     println!("cargo:rustc-link-lib=glib-2.0");
@@ -404,12 +480,13 @@ pub fn build(
     // therefore, we need to link with keyutils if our system have libkeyutils.
     let _: Result<pkg_config::Library, pkg_config::Error> =
         pkg_config::Config::new().probe("libkeyutils");
+    */
 
     if !is_usermode {
-        println!("cargo:rustc-link-lib=pixman-1");
-        if env::var("LINK_SLIRP").is_ok() || cfg!(feature = "slirp") {
-            println!("cargo:rustc-link-lib=slirp");
-        }
+        //println!("cargo:rustc-link-lib=pixman-1");
+        //if env::var("LINK_SLIRP").is_ok() || cfg!(feature = "slirp") {
+        //    println!("cargo:rustc-link-lib=slirp");
+        //}
 
         fs::create_dir_all(target_dir.join("pc-bios")).unwrap();
         for path in fs::read_dir(build_dir.join("pc-bios")).unwrap() {

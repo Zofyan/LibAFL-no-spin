@@ -2,6 +2,7 @@
 //! It should usually be paired with extra error-handling, such as a restarting event manager, to be effective.
 //!
 //! Needs the `fork` feature flag.
+#![allow(clippy::needless_pass_by_value)]
 
 use alloc::boxed::Box;
 #[cfg(all(unix, feature = "std"))]
@@ -25,6 +26,14 @@ use core::{
 #[cfg(all(feature = "std", unix))]
 use std::intrinsics::transmute;
 
+#[cfg(all(unix, not(miri)))]
+use libafl_bolts::os::unix_signals::setup_signal_handler;
+#[cfg(all(feature = "std", unix))]
+use libafl_bolts::os::unix_signals::{ucontext_t, Handler, Signal};
+#[cfg(all(windows, feature = "std"))]
+use libafl_bolts::os::windows_exceptions::setup_exception_handler;
+#[cfg(all(feature = "std", unix))]
+use libafl_bolts::shmem::ShMemProvider;
 #[cfg(all(feature = "std", unix))]
 use libc::siginfo_t;
 #[cfg(all(feature = "std", unix))]
@@ -34,15 +43,9 @@ use nix::{
 };
 #[cfg(windows)]
 use windows::Win32::System::Threading::SetThreadStackGuarantee;
-
-#[cfg(all(unix, not(miri)))]
-use crate::bolts::os::unix_signals::setup_signal_handler;
-#[cfg(all(feature = "std", unix))]
-use crate::bolts::os::unix_signals::{ucontext_t, Handler, Signal};
 #[cfg(all(windows, feature = "std"))]
-use crate::bolts::os::windows_exceptions::setup_exception_handler;
-#[cfg(all(feature = "std", unix))]
-use crate::bolts::shmem::ShMemProvider;
+use windows::Win32::System::Threading::PTP_TIMER;
+
 use crate::{
     events::{EventFirer, EventRestarter},
     executors::{Executor, ExitKind, HasObservers},
@@ -50,7 +53,7 @@ use crate::{
     fuzzer::HasObjective,
     inputs::UsesInput,
     observers::{ObserversTuple, UsesObservers},
-    state::{HasClientPerfMonitor, HasCorpus, HasSolutions, UsesState},
+    state::{HasCorpus, HasExecutions, HasSolutions, State, UsesState},
     Error,
 };
 
@@ -72,7 +75,7 @@ where
     H: FnMut(&S::Input) -> ExitKind + ?Sized,
     HB: BorrowMut<H>,
     OT: ObserversTuple<S>,
-    S: UsesInput,
+    S: State,
 {
     /// The harness function, being executed for each fuzzing loop execution
     harness_fn: HB,
@@ -87,8 +90,8 @@ impl<H, HB, OT, S> Debug for GenericInProcessExecutor<H, HB, OT, S>
 where
     H: FnMut(&S::Input) -> ExitKind + ?Sized,
     HB: BorrowMut<H>,
-    OT: ObserversTuple<S>,
-    S: UsesInput,
+    OT: ObserversTuple<S> + Debug,
+    S: State,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("GenericInProcessExecutor")
@@ -103,7 +106,7 @@ where
     H: ?Sized + FnMut(&S::Input) -> ExitKind,
     HB: BorrowMut<H>,
     OT: ObserversTuple<S>,
-    S: UsesInput,
+    S: State,
 {
     type State = S;
 }
@@ -113,7 +116,7 @@ where
     H: ?Sized + FnMut(&S::Input) -> ExitKind,
     HB: BorrowMut<H>,
     OT: ObserversTuple<S>,
-    S: UsesInput,
+    S: State,
 {
     type Observers = OT;
 }
@@ -124,7 +127,7 @@ where
     HB: BorrowMut<H>,
     EM: UsesState<State = S>,
     OT: ObserversTuple<S>,
-    S: UsesInput,
+    S: State + HasExecutions,
     Z: UsesState<State = S>,
 {
     fn run_target(
@@ -134,6 +137,7 @@ where
         mgr: &mut EM,
         input: &Self::Input,
     ) -> Result<ExitKind, Error> {
+        *state.executions_mut() += 1;
         self.handlers
             .pre_run_target(self, fuzzer, state, mgr, input);
 
@@ -149,7 +153,7 @@ where
     H: FnMut(&S::Input) -> ExitKind + ?Sized,
     HB: BorrowMut<H>,
     OT: ObserversTuple<S>,
-    S: UsesInput,
+    S: State,
 {
     #[inline]
     fn observers(&self) -> &OT {
@@ -167,7 +171,7 @@ where
     H: FnMut(&<S as UsesInput>::Input) -> ExitKind + ?Sized,
     HB: BorrowMut<H>,
     OT: ObserversTuple<S>,
-    S: HasSolutions + HasClientPerfMonitor + HasCorpus,
+    S: HasExecutions + HasSolutions + HasCorpus + State,
 {
     /// Create a new in mem executor.
     /// Caution: crash and restart in one of them will lead to odd behavior if multiple are used,
@@ -186,6 +190,7 @@ where
         Self: Executor<EM, Z, State = S>,
         EM: EventFirer<State = S> + EventRestarter,
         OF: Feedback<S>,
+        S: State,
         Z: HasObjective<Objective = OF, State = S>,
     {
         let handlers = InProcessHandlers::new::<Self, EM, OF, Z>()?;
@@ -203,7 +208,7 @@ where
                 This number 0x20000 could vary depending on the compilers optimization for future compression library changes.
             */
             let mut stack_reserved = 0x20000;
-            SetThreadStackGuarantee(&mut stack_reserved);
+            SetThreadStackGuarantee(&mut stack_reserved)?;
         }
         Ok(Self {
             harness_fn,
@@ -251,7 +256,7 @@ where
     H: FnMut(&<S as UsesInput>::Input) -> ExitKind + ?Sized,
     HB: BorrowMut<H>,
     OT: ObserversTuple<S>,
-    S: HasSolutions + HasClientPerfMonitor + HasCorpus,
+    S: State + HasExecutions + HasSolutions + HasCorpus,
 {
     /// the timeout handler
     #[inline]
@@ -346,7 +351,7 @@ impl InProcessHandlers {
         E: Executor<EM, Z> + HasObservers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
+        E::State: HasExecutions + HasSolutions + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         #[cfg(unix)]
@@ -376,7 +381,7 @@ impl InProcessHandlers {
         E: Executor<EM, Z> + HasObservers + HasInProcessHandlers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
+        E::State: State + HasExecutions + HasSolutions + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         unsafe {
@@ -416,12 +421,13 @@ impl InProcessHandlers {
 
 /// The global state of the in-process harness.
 #[derive(Debug)]
-pub(crate) struct InProcessExecutorHandlerData {
+pub struct InProcessExecutorHandlerData {
     state_ptr: *mut c_void,
     event_mgr_ptr: *mut c_void,
     fuzzer_ptr: *mut c_void,
     executor_ptr: *const c_void,
-    pub current_input_ptr: *const c_void,
+    pub(crate) current_input_ptr: *const c_void,
+    pub(crate) in_handler: bool,
 
     /// The timeout handler
     #[cfg(any(unix, feature = "std"))]
@@ -431,7 +437,7 @@ pub(crate) struct InProcessExecutorHandlerData {
     timeout_handler: *const c_void,
 
     #[cfg(all(windows, feature = "std"))]
-    pub(crate) tp_timer: *mut c_void,
+    pub(crate) ptp_timer: Option<PTP_TIMER>,
     #[cfg(all(windows, feature = "std"))]
     pub(crate) in_target: u64,
     #[cfg(all(windows, feature = "std"))]
@@ -475,7 +481,7 @@ impl InProcessExecutorHandlerData {
     }
 
     #[cfg(any(unix, feature = "std"))]
-    pub fn is_valid(&self) -> bool {
+    pub(crate) fn is_valid(&self) -> bool {
         !self.current_input_ptr.is_null()
     }
 
@@ -487,29 +493,38 @@ impl InProcessExecutorHandlerData {
                 .unwrap()
         }
     }
+
+    #[cfg(any(unix, feature = "std"))]
+    fn set_in_handler(&mut self, v: bool) -> bool {
+        let old = self.in_handler;
+        self.in_handler = v;
+        old
+    }
 }
 
 /// Exception handling needs some nasty unsafe.
 pub(crate) static mut GLOBAL_STATE: InProcessExecutorHandlerData = InProcessExecutorHandlerData {
-    /// The state ptr for signal handling
+    // The state ptr for signal handling
     state_ptr: null_mut(),
-    /// The event manager ptr for signal handling
+    // The event manager ptr for signal handling
     event_mgr_ptr: null_mut(),
-    /// The fuzzer ptr for signal handling
+    // The fuzzer ptr for signal handling
     fuzzer_ptr: null_mut(),
-    /// The executor ptr for signal handling
+    // The executor ptr for signal handling
     executor_ptr: ptr::null(),
-    /// The current input for signal handling
+    // The current input for signal handling
     current_input_ptr: ptr::null(),
 
-    /// The crash handler fn
+    in_handler: false,
+
+    // The crash handler fn
     #[cfg(any(unix, feature = "std"))]
     crash_handler: ptr::null(),
-    /// The timeout handler fn
+    // The timeout handler fn
     #[cfg(any(unix, feature = "std"))]
     timeout_handler: ptr::null(),
     #[cfg(all(windows, feature = "std"))]
-    tp_timer: null_mut(),
+    ptp_timer: None,
     #[cfg(all(windows, feature = "std"))]
     in_target: 0,
     #[cfg(all(windows, feature = "std"))]
@@ -551,6 +566,12 @@ pub fn inprocess_get_input<'a, I>() -> Option<&'a I> {
     unsafe { (GLOBAL_STATE.current_input_ptr as *const I).as_ref() }
 }
 
+/// Know if we ar eexecuting in a crash/timeout handler
+#[must_use]
+pub fn inprocess_in_handler() -> bool {
+    unsafe { GLOBAL_STATE.in_handler }
+}
+
 use crate::{
     corpus::{Corpus, Testcase},
     events::Event,
@@ -571,7 +592,7 @@ pub fn run_observers_and_save_state<E, EM, OF, Z>(
     E: HasObservers,
     EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
     OF: Feedback<E::State>,
-    E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
+    E::State: HasExecutions + HasSolutions + HasCorpus,
     Z: HasObjective<Objective = OF, State = E::State>,
 {
     let observers = executor.observers_mut();
@@ -586,7 +607,7 @@ pub fn run_observers_and_save_state<E, EM, OF, Z>(
         .expect("In run_observers_and_save_state objective failure.");
 
     if interesting {
-        let mut new_testcase = Testcase::new(input.clone());
+        let mut new_testcase = Testcase::with_executions(input.clone(), *state.executions());
         new_testcase.add_metadata(exitkind);
         new_testcase.set_parent_id_optional(*state.corpus().current());
         fuzzer
@@ -607,16 +628,51 @@ pub fn run_observers_and_save_state<E, EM, OF, Z>(
             .expect("Could not save state in run_observers_and_save_state");
     }
 
-    // We will start mutators from scratch after restart.
+    // Serialize the state and wait safely for the broker to read pending messages
     event_mgr.on_restart(state).unwrap();
 
-    log::info!("Waiting for broker...");
-    event_mgr.await_restart_safe();
     log::info!("Bye!");
 }
 
+// TODO remove this after executor refactor and libafl qemu new executor
+/// Expose a version of the crash handler that can be called from e.g. an emulator
+#[cfg(any(unix, feature = "std"))]
+pub fn generic_inproc_crash_handler<E, EM, OF, Z>()
+where
+    E: Executor<EM, Z> + HasObservers,
+    EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
+    OF: Feedback<E::State>,
+    E::State: HasExecutions + HasSolutions + HasCorpus,
+    Z: HasObjective<Objective = OF, State = E::State>,
+{
+    let data = unsafe { &mut GLOBAL_STATE };
+    let in_handler = data.set_in_handler(true);
+
+    if data.is_valid() {
+        let executor = data.executor_mut::<E>();
+        // disarms timeout in case of TimeoutExecutor
+        executor.post_run_reset();
+        let state = data.state_mut::<E::State>();
+        let event_mgr = data.event_mgr_mut::<EM>();
+        let fuzzer = data.fuzzer_mut::<Z>();
+        let input = data.take_current_input::<<E::State as UsesInput>::Input>();
+
+        run_observers_and_save_state::<E, EM, OF, Z>(
+            executor,
+            state,
+            input,
+            fuzzer,
+            event_mgr,
+            ExitKind::Crash,
+        );
+    }
+
+    data.set_in_handler(in_handler);
+}
+
+/// The inprocess executor singal handling code for unix
 #[cfg(unix)]
-mod unix_signal_handler {
+pub mod unix_signal_handler {
     use alloc::vec::Vec;
     #[cfg(feature = "std")]
     use alloc::{boxed::Box, string::String};
@@ -624,12 +680,12 @@ mod unix_signal_handler {
     #[cfg(feature = "std")]
     use std::{io::Write, panic};
 
+    use libafl_bolts::os::unix_signals::{ucontext_t, Handler, Signal};
     use libc::siginfo_t;
 
     #[cfg(feature = "std")]
     use crate::inputs::Input;
     use crate::{
-        bolts::os::unix_signals::{ucontext_t, Handler, Signal},
         events::{EventFirer, EventRestarter},
         executors::{
             inprocess::{run_observers_and_save_state, InProcessExecutorHandlerData, GLOBAL_STATE},
@@ -638,26 +694,36 @@ mod unix_signal_handler {
         feedbacks::Feedback,
         fuzzer::HasObjective,
         inputs::UsesInput,
-        state::{HasClientPerfMonitor, HasCorpus, HasSolutions},
+        state::{HasCorpus, HasExecutions, HasSolutions},
     };
 
-    pub(crate) type HandlerFuncPtr =
-        unsafe fn(Signal, siginfo_t, &mut ucontext_t, data: &mut InProcessExecutorHandlerData);
+    pub(crate) type HandlerFuncPtr = unsafe fn(
+        Signal,
+        &mut siginfo_t,
+        Option<&mut ucontext_t>,
+        data: &mut InProcessExecutorHandlerData,
+    );
 
     /// A handler that does nothing.
     /*pub fn nop_handler(
         _signal: Signal,
-        _info: siginfo_t,
-        _context: &mut ucontext_t,
+        _info: &mut siginfo_t,
+        _context: Option<&mut ucontext_t>,
         _data: &mut InProcessExecutorHandlerData,
     ) {
     }*/
 
     #[cfg(unix)]
     impl Handler for InProcessExecutorHandlerData {
-        fn handle(&mut self, signal: Signal, info: siginfo_t, context: &mut ucontext_t) {
+        fn handle(
+            &mut self,
+            signal: Signal,
+            info: &mut siginfo_t,
+            context: Option<&mut ucontext_t>,
+        ) {
             unsafe {
                 let data = &mut GLOBAL_STATE;
+                let in_handler = data.set_in_handler(true);
                 match signal {
                     Signal::SigUser2 | Signal::SigAlarm => {
                         if !data.timeout_handler.is_null() {
@@ -672,6 +738,7 @@ mod unix_signal_handler {
                         }
                     }
                 }
+                data.set_in_handler(in_handler);
             }
         }
 
@@ -697,13 +764,14 @@ mod unix_signal_handler {
         E: HasObservers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
+        E::State: HasExecutions + HasSolutions + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         let old_hook = panic::take_hook();
         panic::set_hook(Box::new(move |panic_info| {
             old_hook(panic_info);
             let data = unsafe { &mut GLOBAL_STATE };
+            let in_handler = data.set_in_handler(true);
             if data.is_valid() {
                 // We are fuzzing!
                 let executor = data.executor_mut::<E>();
@@ -725,20 +793,26 @@ mod unix_signal_handler {
                     libc::_exit(128 + 6);
                 } // SIGABRT exit code
             }
+            data.set_in_handler(in_handler);
         }));
     }
 
+    /// Timeout-Handler for in-process fuzzing.
+    /// It will store the current State to shmem, then exit.
+    ///
+    /// # Safety
+    /// Well, signal handling is not safe
     #[cfg(unix)]
-    pub(crate) unsafe fn inproc_timeout_handler<E, EM, OF, Z>(
+    pub unsafe fn inproc_timeout_handler<E, EM, OF, Z>(
         _signal: Signal,
-        _info: siginfo_t,
-        _context: &mut ucontext_t,
+        _info: &mut siginfo_t,
+        _context: Option<&mut ucontext_t>,
         data: &mut InProcessExecutorHandlerData,
     ) where
         E: HasObservers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
+        E::State: HasExecutions + HasSolutions + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         if !data.timeout_executor_ptr.is_null()
@@ -769,30 +843,33 @@ mod unix_signal_handler {
             ExitKind::Timeout,
         );
 
-        event_mgr.await_restart_safe();
-
         libc::_exit(55);
     }
 
     /// Crash-Handler for in-process fuzzing.
     /// Will be used for signal handling.
     /// It will store the current State to shmem, then exit.
+    ///
+    /// # Safety
+    /// Well, signal handling is not safe
     #[allow(clippy::too_many_lines)]
-    pub(crate) unsafe fn inproc_crash_handler<E, EM, OF, Z>(
+    pub unsafe fn inproc_crash_handler<E, EM, OF, Z>(
         signal: Signal,
-        _info: siginfo_t,
-        _context: &mut ucontext_t,
+        _info: &mut siginfo_t,
+        _context: Option<&mut ucontext_t>,
         data: &mut InProcessExecutorHandlerData,
     ) where
         E: Executor<EM, Z> + HasObservers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
+        E::State: HasExecutions + HasSolutions + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         #[cfg(all(target_os = "android", target_arch = "aarch64"))]
-        let _context = &mut *(((_context as *mut _ as *mut libc::c_void as usize) + 128)
-            as *mut libc::c_void as *mut ucontext_t);
+        let _context = _context.map(|p| {
+            &mut *(((p as *mut _ as *mut libc::c_void as usize) + 128) as *mut libc::c_void
+                as *mut ucontext_t)
+        });
 
         log::error!("Crashed with {signal}");
         if data.is_valid() {
@@ -812,8 +889,13 @@ mod unix_signal_handler {
                 {
                     let mut writer = std::io::BufWriter::new(&mut bsod);
                     writeln!(writer, "input: {:?}", input.generate_name(0)).unwrap();
-                    crate::bolts::minibsod::generate_minibsod(&mut writer, signal, _info, _context)
-                        .unwrap();
+                    libafl_bolts::minibsod::generate_minibsod(
+                        &mut writer,
+                        signal,
+                        _info,
+                        _context.as_deref(),
+                    )
+                    .unwrap();
                     writer.flush().unwrap();
                 }
                 log::error!("{}", std::str::from_utf8(&bsod).unwrap());
@@ -836,7 +918,7 @@ mod unix_signal_handler {
                 let si_addr = { _info.si_addr() as usize };
 
                 log::error!(
-                "We crashed at addr 0x{si_addr:x}, but are not in the target... Bug in the fuzzer? Exiting."
+                    "We crashed at addr 0x{si_addr:x}, but are not in the target... Bug in the fuzzer? Exiting."
                 );
 
                 #[cfg(all(feature = "std", unix))]
@@ -844,11 +926,11 @@ mod unix_signal_handler {
                     let mut bsod = Vec::new();
                     {
                         let mut writer = std::io::BufWriter::new(&mut bsod);
-                        crate::bolts::minibsod::generate_minibsod(
+                        libafl_bolts::minibsod::generate_minibsod(
                             &mut writer,
                             signal,
                             _info,
-                            _context,
+                            _context.as_deref(),
                         )
                         .unwrap();
                         writer.flush().unwrap();
@@ -877,13 +959,10 @@ mod unix_signal_handler {
 #[cfg(all(windows, feature = "std"))]
 pub mod windows_asan_handler {
     use alloc::string::String;
-    use core::{
-        ptr,
-        sync::atomic::{compiler_fence, Ordering},
-    };
+    use core::sync::atomic::{compiler_fence, Ordering};
 
     use windows::Win32::System::Threading::{
-        EnterCriticalSection, LeaveCriticalSection, RTL_CRITICAL_SECTION,
+        EnterCriticalSection, LeaveCriticalSection, CRITICAL_SECTION,
     };
 
     use crate::{
@@ -895,7 +974,7 @@ pub mod windows_asan_handler {
         feedbacks::Feedback,
         fuzzer::HasObjective,
         inputs::UsesInput,
-        state::{HasClientPerfMonitor, HasCorpus, HasSolutions},
+        state::{HasCorpus, HasExecutions, HasSolutions},
     };
 
     /// # Safety
@@ -905,23 +984,24 @@ pub mod windows_asan_handler {
         E: Executor<EM, Z> + HasObservers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
+        E::State: HasExecutions + HasSolutions + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         let data = &mut GLOBAL_STATE;
+        data.set_in_handler(true);
         // Have we set a timer_before?
-        if !(data.tp_timer as *mut windows::Win32::System::Threading::TP_TIMER).is_null() {
+        if data.ptp_timer.is_some() {
             /*
                 We want to prevent the timeout handler being run while the main thread is executing the crash handler
                 Timeout handler runs if it has access to the critical section or data.in_target == 0
                 Writing 0 to the data.in_target makes the timeout handler makes the timeout handler invalid.
             */
             compiler_fence(Ordering::SeqCst);
-            EnterCriticalSection(data.critical as *mut RTL_CRITICAL_SECTION);
+            EnterCriticalSection(data.critical as *mut CRITICAL_SECTION);
             compiler_fence(Ordering::SeqCst);
             data.in_target = 0;
             compiler_fence(Ordering::SeqCst);
-            LeaveCriticalSection(data.critical as *mut RTL_CRITICAL_SECTION);
+            LeaveCriticalSection(data.critical as *mut CRITICAL_SECTION);
             compiler_fence(Ordering::SeqCst);
         }
 
@@ -946,9 +1026,9 @@ pub mod windows_asan_handler {
         } else {
             let executor = data.executor_mut::<E>();
             // reset timer
-            if !data.tp_timer.is_null() {
+            if data.ptp_timer.is_some() {
                 executor.post_run_reset();
-                data.tp_timer = ptr::null_mut();
+                data.ptp_timer = None;
             }
 
             let state = data.state_mut::<E::State>();
@@ -975,7 +1055,7 @@ pub mod windows_asan_handler {
 }
 
 #[cfg(all(windows, feature = "std"))]
-mod windows_exception_handler {
+pub mod windows_exception_handler {
     #[cfg(feature = "std")]
     use alloc::boxed::Box;
     use alloc::{string::String, vec::Vec};
@@ -988,14 +1068,14 @@ mod windows_exception_handler {
     #[cfg(feature = "std")]
     use std::panic;
 
+    use libafl_bolts::os::windows_exceptions::{
+        ExceptionCode, Handler, CRASH_EXCEPTIONS, EXCEPTION_HANDLERS_SIZE, EXCEPTION_POINTERS,
+    };
     use windows::Win32::System::Threading::{
-        EnterCriticalSection, ExitProcess, LeaveCriticalSection, RTL_CRITICAL_SECTION,
+        EnterCriticalSection, ExitProcess, LeaveCriticalSection, CRITICAL_SECTION,
     };
 
     use crate::{
-        bolts::os::windows_exceptions::{
-            ExceptionCode, Handler, CRASH_EXCEPTIONS, EXCEPTION_HANDLERS_SIZE, EXCEPTION_POINTERS,
-        },
         events::{EventFirer, EventRestarter},
         executors::{
             inprocess::{
@@ -1007,7 +1087,7 @@ mod windows_exception_handler {
         feedbacks::Feedback,
         fuzzer::HasObjective,
         inputs::UsesInput,
-        state::{HasClientPerfMonitor, HasCorpus, HasSolutions},
+        state::{HasCorpus, HasExecutions, HasSolutions, State},
     };
 
     pub(crate) type HandlerFuncPtr =
@@ -1025,10 +1105,12 @@ mod windows_exception_handler {
         fn handle(&mut self, _code: ExceptionCode, exception_pointers: *mut EXCEPTION_POINTERS) {
             unsafe {
                 let data = &mut GLOBAL_STATE;
+                let in_handler = data.set_in_handler(true);
                 if !data.crash_handler.is_null() {
                     let func: HandlerFuncPtr = transmute(data.crash_handler);
                     (func)(exception_pointers, data);
                 }
+                data.set_in_handler(in_handler);
             }
         }
 
@@ -1040,32 +1122,36 @@ mod windows_exception_handler {
     }
 
     /// invokes the `post_exec` hook on all observer in case of panic
+    ///
+    /// # Safety
+    /// Well, exception handling is not safe
     #[cfg(feature = "std")]
     pub fn setup_panic_hook<E, EM, OF, Z>()
     where
         E: HasObservers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
+        E::State: HasExecutions + HasSolutions + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         let old_hook = panic::take_hook();
         panic::set_hook(Box::new(move |panic_info| {
             let data = unsafe { &mut GLOBAL_STATE };
+            let in_handler = data.set_in_handler(true);
             // Have we set a timer_before?
             unsafe {
-                if !(data.tp_timer as *mut windows::Win32::System::Threading::TP_TIMER).is_null() {
+                if data.ptp_timer.is_some() {
                     /*
                         We want to prevent the timeout handler being run while the main thread is executing the crash handler
                         Timeout handler runs if it has access to the critical section or data.in_target == 0
                         Writing 0 to the data.in_target makes the timeout handler makes the timeout handler invalid.
                     */
                     compiler_fence(Ordering::SeqCst);
-                    EnterCriticalSection(data.critical as *mut RTL_CRITICAL_SECTION);
+                    EnterCriticalSection(data.critical as *mut CRITICAL_SECTION);
                     compiler_fence(Ordering::SeqCst);
                     data.in_target = 0;
                     compiler_fence(Ordering::SeqCst);
-                    LeaveCriticalSection(data.critical as *mut RTL_CRITICAL_SECTION);
+                    LeaveCriticalSection(data.critical as *mut CRITICAL_SECTION);
                     compiler_fence(Ordering::SeqCst);
                 }
             }
@@ -1093,10 +1179,14 @@ mod windows_exception_handler {
                 }
             }
             old_hook(panic_info);
+            data.set_in_handler(in_handler);
         }));
     }
 
     /// Timeout handler for windows
+    ///
+    /// # Safety
+    /// Well, exception handling is not safe
     pub unsafe extern "system" fn inproc_timeout_handler<E, EM, OF, Z>(
         _p0: *mut u8,
         global_state: *mut c_void,
@@ -1105,28 +1195,20 @@ mod windows_exception_handler {
         E: HasObservers + HasInProcessHandlers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
+        E::State: State + HasExecutions + HasSolutions + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         let data: &mut InProcessExecutorHandlerData =
             &mut *(global_state as *mut InProcessExecutorHandlerData);
         compiler_fence(Ordering::SeqCst);
-        EnterCriticalSection(
-            (data.critical as *mut RTL_CRITICAL_SECTION)
-                .as_mut()
-                .unwrap(),
-        );
+        EnterCriticalSection((data.critical as *mut CRITICAL_SECTION).as_mut().unwrap());
         compiler_fence(Ordering::SeqCst);
 
         if !data.timeout_executor_ptr.is_null()
             && data.timeout_executor_mut::<E>().handle_timeout(data)
         {
             compiler_fence(Ordering::SeqCst);
-            LeaveCriticalSection(
-                (data.critical as *mut RTL_CRITICAL_SECTION)
-                    .as_mut()
-                    .unwrap(),
-            );
+            LeaveCriticalSection((data.critical as *mut CRITICAL_SECTION).as_mut().unwrap());
             compiler_fence(Ordering::SeqCst);
 
             return;
@@ -1163,39 +1245,39 @@ mod windows_exception_handler {
             }
         }
         compiler_fence(Ordering::SeqCst);
-        LeaveCriticalSection(
-            (data.critical as *mut RTL_CRITICAL_SECTION)
-                .as_mut()
-                .unwrap(),
-        );
+        LeaveCriticalSection((data.critical as *mut CRITICAL_SECTION).as_mut().unwrap());
         compiler_fence(Ordering::SeqCst);
         // log::info!("TIMER INVOKED!");
     }
 
+    /// Crash handler for windows
+    ///
+    /// # Safety
+    /// Well, exception handling is not safe
     #[allow(clippy::too_many_lines)]
-    pub(crate) unsafe fn inproc_crash_handler<E, EM, OF, Z>(
+    pub unsafe fn inproc_crash_handler<E, EM, OF, Z>(
         exception_pointers: *mut EXCEPTION_POINTERS,
         data: &mut InProcessExecutorHandlerData,
     ) where
         E: Executor<EM, Z> + HasObservers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
+        E::State: HasExecutions + HasSolutions + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         // Have we set a timer_before?
-        if !(data.tp_timer as *mut windows::Win32::System::Threading::TP_TIMER).is_null() {
+        if data.ptp_timer.is_some() {
             /*
                 We want to prevent the timeout handler being run while the main thread is executing the crash handler
                 Timeout handler runs if it has access to the critical section or data.in_target == 0
                 Writing 0 to the data.in_target makes the timeout handler makes the timeout handler invalid.
             */
             compiler_fence(Ordering::SeqCst);
-            EnterCriticalSection(data.critical as *mut RTL_CRITICAL_SECTION);
+            EnterCriticalSection(data.critical as *mut CRITICAL_SECTION);
             compiler_fence(Ordering::SeqCst);
             data.in_target = 0;
             compiler_fence(Ordering::SeqCst);
-            LeaveCriticalSection(data.critical as *mut RTL_CRITICAL_SECTION);
+            LeaveCriticalSection(data.critical as *mut CRITICAL_SECTION);
             compiler_fence(Ordering::SeqCst);
         }
 
@@ -1252,9 +1334,9 @@ mod windows_exception_handler {
         } else {
             let executor = data.executor_mut::<E>();
             // reset timer
-            if !data.tp_timer.is_null() {
+            if data.ptp_timer.is_some() {
                 executor.post_run_reset();
-                data.tp_timer = ptr::null_mut();
+                data.ptp_timer = None;
             }
 
             let state = data.state_mut::<E::State>();
@@ -1294,8 +1376,12 @@ mod windows_exception_handler {
 
 /// The signature of the crash handler function
 #[cfg(all(feature = "std", unix))]
-pub(crate) type ForkHandlerFuncPtr =
-    unsafe fn(Signal, siginfo_t, &mut ucontext_t, data: &mut InProcessForkExecutorGlobalData);
+pub(crate) type ForkHandlerFuncPtr = unsafe fn(
+    Signal,
+    &mut siginfo_t,
+    Option<&mut ucontext_t>,
+    data: &mut InProcessForkExecutorGlobalData,
+);
 
 /// The inmem fork executor's handlers.
 #[cfg(all(feature = "std", unix))]
@@ -1435,7 +1521,7 @@ pub(crate) static mut FORK_EXECUTOR_GLOBAL_DATA: InProcessForkExecutorGlobalData
 
 #[cfg(all(feature = "std", unix))]
 impl Handler for InProcessForkExecutorGlobalData {
-    fn handle(&mut self, signal: Signal, info: siginfo_t, context: &mut ucontext_t) {
+    fn handle(&mut self, signal: Signal, info: &mut siginfo_t, context: Option<&mut ucontext_t>) {
         match signal {
             Signal::SigUser2 | Signal::SigAlarm => unsafe {
                 if !FORK_EXECUTOR_GLOBAL_DATA.timeout_handler.is_null() {
@@ -1550,7 +1636,7 @@ where
 impl<'a, H, OT, S, SP> Debug for InProcessForkExecutor<'a, H, OT, S, SP>
 where
     H: FnMut(&S::Input) -> ExitKind + ?Sized,
-    OT: ObserversTuple<S>,
+    OT: ObserversTuple<S> + Debug,
     S: UsesInput,
     SP: ShMemProvider,
 {
@@ -1566,7 +1652,7 @@ where
 impl<'a, H, OT, S, SP> Debug for TimeoutInProcessForkExecutor<'a, H, OT, S, SP>
 where
     H: FnMut(&S::Input) -> ExitKind + ?Sized,
-    OT: ObserversTuple<S>,
+    OT: ObserversTuple<S> + Debug,
     S: UsesInput,
     SP: ShMemProvider,
 {
@@ -1596,7 +1682,7 @@ impl<'a, H, OT, S, SP> UsesState for InProcessForkExecutor<'a, H, OT, S, SP>
 where
     H: ?Sized + FnMut(&S::Input) -> ExitKind,
     OT: ObserversTuple<S>,
-    S: UsesInput,
+    S: State,
     SP: ShMemProvider,
 {
     type State = S;
@@ -1607,7 +1693,7 @@ impl<'a, H, OT, S, SP> UsesState for TimeoutInProcessForkExecutor<'a, H, OT, S, 
 where
     H: ?Sized + FnMut(&S::Input) -> ExitKind,
     OT: ObserversTuple<S>,
-    S: UsesInput,
+    S: State,
     SP: ShMemProvider,
 {
     type State = S;
@@ -1619,7 +1705,7 @@ where
     EM: UsesState<State = S>,
     H: FnMut(&S::Input) -> ExitKind + ?Sized,
     OT: ObserversTuple<S>,
-    S: UsesInput,
+    S: State + HasExecutions,
     SP: ShMemProvider,
     Z: UsesState<State = S>,
 {
@@ -1632,6 +1718,7 @@ where
         _mgr: &mut EM,
         input: &Self::Input,
     ) -> Result<ExitKind, Error> {
+        *state.executions_mut() += 1;
         unsafe {
             self.shmem_provider.pre_fork()?;
             match fork() {
@@ -1643,7 +1730,7 @@ where
 
                     self.observers
                         .pre_exec_child_all(state, input)
-                        .expect("Failed to run post_exec on observers");
+                        .expect("Failed to run pre_exec on observers");
 
                     (self.harness_fn)(input);
 
@@ -1687,7 +1774,7 @@ where
     EM: UsesState<State = S>,
     H: FnMut(&S::Input) -> ExitKind + ?Sized,
     OT: ObserversTuple<S>,
-    S: UsesInput,
+    S: State + HasExecutions,
     SP: ShMemProvider,
     Z: UsesState<State = S>,
 {
@@ -1700,6 +1787,8 @@ where
         _mgr: &mut EM,
         input: &Self::Input,
     ) -> Result<ExitKind, Error> {
+        *state.executions_mut() += 1;
+
         unsafe {
             self.shmem_provider.pre_fork()?;
             match fork() {
@@ -1789,7 +1878,7 @@ impl<'a, H, OT, S, SP> InProcessForkExecutor<'a, H, OT, S, SP>
 where
     H: FnMut(&S::Input) -> ExitKind + ?Sized,
     OT: ObserversTuple<S>,
-    S: UsesInput,
+    S: State,
     SP: ShMemProvider,
 {
     /// Creates a new [`InProcessForkExecutor`]
@@ -1804,7 +1893,7 @@ where
     where
         EM: EventFirer<State = S> + EventRestarter,
         OF: Feedback<S>,
-        S: HasSolutions + HasClientPerfMonitor,
+        S: HasSolutions,
         Z: HasObjective<Objective = OF, State = S>,
     {
         let handlers = InChildProcessHandlers::new::<Self>()?;
@@ -1834,7 +1923,7 @@ where
 impl<'a, H, OT, S, SP> TimeoutInProcessForkExecutor<'a, H, OT, S, SP>
 where
     H: FnMut(&S::Input) -> ExitKind + ?Sized,
-    S: UsesInput,
+    S: State,
     OT: ObserversTuple<S>,
     SP: ShMemProvider,
 {
@@ -1852,7 +1941,7 @@ where
     where
         EM: EventFirer<State = S> + EventRestarter<State = S>,
         OF: Feedback<S>,
-        S: HasSolutions + HasClientPerfMonitor,
+        S: HasSolutions,
         Z: HasObjective<Objective = OF, State = S>,
     {
         let handlers = InChildProcessHandlers::with_timeout::<Self>()?;
@@ -1894,7 +1983,7 @@ where
     where
         EM: EventFirer<State = S> + EventRestarter<State = S>,
         OF: Feedback<S>,
-        S: HasSolutions + HasClientPerfMonitor,
+        S: HasSolutions,
         Z: HasObjective<Objective = OF, State = S>,
     {
         let handlers = InChildProcessHandlers::with_timeout::<Self>()?;
@@ -1940,7 +2029,7 @@ impl<'a, H, OT, S, SP> UsesObservers for InProcessForkExecutor<'a, H, OT, S, SP>
 where
     H: ?Sized + FnMut(&S::Input) -> ExitKind,
     OT: ObserversTuple<S>,
-    S: UsesInput,
+    S: State,
     SP: ShMemProvider,
 {
     type Observers = OT;
@@ -1951,7 +2040,7 @@ impl<'a, H, OT, S, SP> UsesObservers for TimeoutInProcessForkExecutor<'a, H, OT,
 where
     H: ?Sized + FnMut(&S::Input) -> ExitKind,
     OT: ObserversTuple<S>,
-    S: UsesInput,
+    S: State,
     SP: ShMemProvider,
 {
     type Observers = OT;
@@ -1961,7 +2050,7 @@ where
 impl<'a, H, OT, S, SP> HasObservers for InProcessForkExecutor<'a, H, OT, S, SP>
 where
     H: FnMut(&S::Input) -> ExitKind + ?Sized,
-    S: UsesInput,
+    S: State,
     OT: ObserversTuple<S>,
     SP: ShMemProvider,
 {
@@ -1980,7 +2069,7 @@ where
 impl<'a, H, OT, S, SP> HasObservers for TimeoutInProcessForkExecutor<'a, H, OT, S, SP>
 where
     H: FnMut(&S::Input) -> ExitKind + ?Sized,
-    S: UsesInput,
+    S: State,
     OT: ObserversTuple<S>,
     SP: ShMemProvider,
 {
@@ -2001,11 +2090,11 @@ pub mod child_signal_handlers {
     use alloc::boxed::Box;
     use std::panic;
 
+    use libafl_bolts::os::unix_signals::{ucontext_t, Signal};
     use libc::siginfo_t;
 
     use super::{InProcessForkExecutorGlobalData, FORK_EXECUTOR_GLOBAL_DATA};
     use crate::{
-        bolts::os::unix_signals::{ucontext_t, Signal},
         executors::{ExitKind, HasObservers},
         inputs::UsesInput,
         observers::ObserversTuple,
@@ -2044,8 +2133,8 @@ pub mod child_signal_handlers {
     #[cfg(unix)]
     pub(crate) unsafe fn child_crash_handler<E>(
         _signal: Signal,
-        _info: siginfo_t,
-        _context: &mut ucontext_t,
+        _info: &mut siginfo_t,
+        _context: Option<&mut ucontext_t>,
         data: &mut InProcessForkExecutorGlobalData,
     ) where
         E: HasObservers,
@@ -2066,8 +2155,8 @@ pub mod child_signal_handlers {
     #[cfg(unix)]
     pub(crate) unsafe fn child_timeout_handler<E>(
         _signal: Signal,
-        _info: siginfo_t,
-        _context: &mut ucontext_t,
+        _info: &mut siginfo_t,
+        _context: Option<&mut ucontext_t>,
         data: &mut InProcessForkExecutorGlobalData,
     ) where
         E: HasObservers,
@@ -2089,11 +2178,11 @@ pub mod child_signal_handlers {
 mod tests {
     use core::marker::PhantomData;
 
+    use libafl_bolts::tuples::tuple_list;
     #[cfg(all(feature = "std", feature = "fork", unix))]
     use serial_test::serial;
 
     use crate::{
-        bolts::tuples::tuple_list,
         events::NopEventManager,
         executors::{inprocess::InProcessHandlers, Executor, ExitKind, InProcessExecutor},
         inputs::{NopInput, UsesInput},
@@ -2131,8 +2220,9 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[cfg(all(feature = "std", feature = "fork", unix))]
     fn test_inprocessfork_exec() {
+        use libafl_bolts::shmem::{ShMemProvider, StdShMemProvider};
+
         use crate::{
-            bolts::shmem::{ShMemProvider, StdShMemProvider},
             events::SimpleEventManager,
             executors::{inprocess::InChildProcessHandlers, InProcessForkExecutor},
             state::NopState,
@@ -2161,6 +2251,7 @@ mod tests {
 
 #[cfg(feature = "python")]
 #[allow(missing_docs)]
+#[allow(clippy::unnecessary_fallible_conversions)]
 /// `InProcess` Python bindings
 pub mod pybind {
     use alloc::boxed::Box;

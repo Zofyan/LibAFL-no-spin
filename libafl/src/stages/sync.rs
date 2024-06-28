@@ -7,28 +7,34 @@ use std::{
     time::SystemTime,
 };
 
+use libafl_bolts::{current_time, shmem::ShMemProvider};
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "introspection")]
+use crate::state::HasClientPerfMonitor;
 use crate::{
-    bolts::{current_time, shmem::ShMemProvider},
     corpus::{Corpus, CorpusId, HasTestcase},
     events::{llmp::LlmpEventConverter, Event, EventConfig, EventFirer},
     executors::{Executor, ExitKind, HasObservers},
     fuzzer::{Evaluator, EvaluatorObservers, ExecutionProcessor},
     inputs::{Input, InputConverter, UsesInput},
     stages::Stage,
-    state::{HasClientPerfMonitor, HasCorpus, HasExecutions, HasMetadata, HasRand, UsesState},
+    state::{HasCorpus, HasExecutions, HasMetadata, HasRand, State, UsesState},
     Error,
 };
 
 /// Metadata used to store information about disk sync time
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SyncFromDiskMetadata {
     /// The last time the sync was done
     pub last_time: SystemTime,
 }
 
-crate::impl_serdeany!(SyncFromDiskMetadata);
+libafl_bolts::impl_serdeany!(SyncFromDiskMetadata);
 
 impl SyncFromDiskMetadata {
     /// Create a new [`struct@SyncFromDiskMetadata`]
@@ -59,7 +65,7 @@ where
     E: UsesState<State = Z::State>,
     EM: UsesState<State = Z::State>,
     Z: Evaluator<E, EM>,
-    Z::State: HasClientPerfMonitor + HasCorpus + HasRand + HasMetadata,
+    Z::State: HasCorpus + HasRand + HasMetadata,
 {
     #[inline]
     fn perform(
@@ -104,7 +110,7 @@ where
     E: UsesState<State = Z::State>,
     EM: UsesState<State = Z::State>,
     Z: Evaluator<E, EM>,
-    Z::State: HasClientPerfMonitor + HasCorpus + HasRand + HasMetadata,
+    Z::State: HasCorpus + HasRand + HasMetadata,
 {
     /// Creates a new [`SyncFromDiskStage`]
     #[must_use]
@@ -170,7 +176,7 @@ where
     E: UsesState<State = Z::State>,
     EM: UsesState<State = Z::State>,
     Z: Evaluator<E, EM>,
-    Z::State: HasClientPerfMonitor + HasCorpus + HasRand + HasMetadata,
+    Z::State: HasCorpus + HasRand + HasMetadata,
 {
     /// Creates a new [`SyncFromDiskStage`] invoking `Input::from_file` to load inputs
     #[must_use]
@@ -191,13 +197,17 @@ where
 }
 
 /// Metadata used to store information about the last sent testcase with `SyncFromBrokerStage`
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SyncFromBrokerMetadata {
     /// The `CorpusId` of the last sent testcase
     pub last_id: Option<CorpusId>,
 }
 
-crate::impl_serdeany!(SyncFromBrokerMetadata);
+libafl_bolts::impl_serdeany!(SyncFromBrokerMetadata);
 
 impl SyncFromBrokerMetadata {
     /// Create a new [`struct@SyncFromBrokerMetadata`]
@@ -223,7 +233,7 @@ where
 impl<IC, ICB, DI, S, SP> UsesState for SyncFromBrokerStage<IC, ICB, DI, S, SP>
 where
     SP: ShMemProvider + 'static,
-    S: UsesInput,
+    S: State,
     IC: InputConverter<From = S::Input, To = DI>,
     ICB: InputConverter<From = DI, To = S::Input>,
     DI: Input,
@@ -234,13 +244,7 @@ where
 impl<E, EM, IC, ICB, DI, S, SP, Z> Stage<E, EM, Z> for SyncFromBrokerStage<IC, ICB, DI, S, SP>
 where
     EM: UsesState<State = S> + EventFirer,
-    S: UsesInput
-        + HasClientPerfMonitor
-        + HasExecutions
-        + HasCorpus
-        + HasRand
-        + HasMetadata
-        + HasTestcase,
+    S: State + HasExecutions + HasCorpus + HasRand + HasMetadata + HasTestcase,
     SP: ShMemProvider,
     E: HasObservers<State = S> + Executor<EM, Z>,
     for<'a> E::Observers: Deserialize<'a>,

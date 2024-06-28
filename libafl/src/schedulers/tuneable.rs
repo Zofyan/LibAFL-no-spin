@@ -5,19 +5,22 @@
 use alloc::borrow::ToOwned;
 use core::marker::PhantomData;
 
+use libafl_bolts::impl_serdeany;
 use serde::{Deserialize, Serialize};
 
 use super::RemovableScheduler;
 use crate::{
     corpus::{Corpus, CorpusId, HasTestcase},
-    impl_serdeany,
-    inputs::UsesInput,
     schedulers::Scheduler,
-    state::{HasCorpus, HasMetadata, UsesState},
+    state::{HasCorpus, HasMetadata, State, UsesState},
     Error,
 };
 
 #[derive(Default, Clone, Copy, Eq, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 struct TuneableSchedulerMetadata {
     next: Option<CorpusId>,
 }
@@ -87,16 +90,19 @@ where
 
 impl<S> UsesState for TuneableScheduler<S>
 where
-    S: UsesInput,
+    S: State,
 {
     type State = S;
 }
 
-impl<S> RemovableScheduler for TuneableScheduler<S> where S: HasCorpus + HasMetadata + HasTestcase {}
+impl<S> RemovableScheduler for TuneableScheduler<S> where
+    S: HasCorpus + HasMetadata + HasTestcase + State
+{
+}
 
 impl<S> Scheduler for TuneableScheduler<S>
 where
-    S: HasCorpus + HasMetadata + HasTestcase,
+    S: HasCorpus + HasMetadata + HasTestcase + State,
 {
     fn on_add(&mut self, state: &mut Self::State, idx: CorpusId) -> Result<(), Error> {
         // Set parent id

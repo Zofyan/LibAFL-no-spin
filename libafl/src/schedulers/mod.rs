@@ -30,15 +30,15 @@ pub mod ecofuzz;
 pub use ecofuzz::{EcoMetadata, EcoScheduler, EcoState, EcoTestcaseMetadata, EcoTestcaseScore};
 
 pub mod tuneable;
+use libafl_bolts::rands::Rand;
 pub use tuneable::*;
 
 use crate::{
-    bolts::rands::Rand,
     corpus::{Corpus, CorpusId, HasTestcase, Testcase},
     inputs::UsesInput,
     observers::ObserversTuple,
     random_corpus_id,
-    state::{HasCorpus, HasRand, UsesState},
+    state::{HasCorpus, HasRand, State, UsesState},
     Error,
 };
 
@@ -74,7 +74,7 @@ pub trait Scheduler: UsesState
 where
     Self::State: HasCorpus,
 {
-    /// Added an entry to the corpus at the given index
+    /// Called when a [`Testcase`] is added to the corpus
     fn on_add(&mut self, _state: &mut Self::State, _idx: CorpusId) -> Result<(), Error>;
     // Add parent_id here if it has no inner
 
@@ -114,14 +114,14 @@ pub struct RandScheduler<S> {
 
 impl<S> UsesState for RandScheduler<S>
 where
-    S: UsesInput + HasTestcase,
+    S: State + HasTestcase,
 {
     type State = S;
 }
 
 impl<S> Scheduler for RandScheduler<S>
 where
-    S: HasCorpus + HasRand + HasTestcase,
+    S: HasCorpus + HasRand + HasTestcase + State,
 {
     fn on_add(&mut self, state: &mut Self::State, idx: CorpusId) -> Result<(), Error> {
         // Set parent id

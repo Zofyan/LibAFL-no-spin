@@ -31,6 +31,7 @@ use std::{
 
 // using thread in order to start the HTTP server in a separate thread
 use futures::executor::block_on;
+use libafl_bolts::{current_time, format_duration_hms, ClientId};
 // using the official rust client library for Prometheus: https://github.com/prometheus/client_rust
 use prometheus_client::{
     encoding::{text::encode, EncodeLabelSet},
@@ -40,10 +41,7 @@ use prometheus_client::{
 // using tide for the HTTP server library (fast, async, simple)
 use tide::Request;
 
-use crate::{
-    bolts::{current_time, format_duration_hms, ClientId},
-    monitors::{ClientStats, Monitor, UserStats},
-};
+use crate::monitors::{ClientStats, Monitor, UserStatsValue};
 
 /// Tracking monitor during fuzzing.
 #[derive(Clone)]
@@ -71,7 +69,7 @@ where
         f.debug_struct("PrometheusMonitor")
             .field("start_time", &self.start_time)
             .field("client_stats", &self.client_stats)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -90,8 +88,13 @@ where
     }
 
     /// Time this fuzzing run stated
-    fn start_time(&mut self) -> Duration {
+    fn start_time(&self) -> Duration {
         self.start_time
+    }
+
+    /// Set creation time
+    fn set_start_time(&mut self, time: Duration) {
+        self.start_time = time;
     }
 
     #[allow(clippy::cast_sign_loss)]
@@ -161,6 +164,7 @@ where
         );
         (self.print_fn)(fmt);
 
+        self.client_stats_insert(sender_id);
         let cur_client = self.client_stats_mut_for(sender_id);
         let cur_client_clone = cur_client.clone();
 
@@ -169,11 +173,12 @@ where
             // You can filter for each custom stat in promQL via labels of both the stat name and client id
             log::info!("{key}: {val}");
             #[allow(clippy::cast_precision_loss)]
-            let value: f64 = match val {
-                UserStats::Number(n) => n as f64,
-                UserStats::Float(f) => f,
-                UserStats::String(_s) => 0.0,
-                UserStats::Ratio(a, b) => (a as f64 / b as f64) * 100.0,
+            let value: f64 = match val.value() {
+                UserStatsValue::Number(n) => *n as f64,
+                UserStatsValue::Float(f) => *f,
+                UserStatsValue::String(_s) => 0.0,
+                UserStatsValue::Ratio(a, b) => (*a as f64 / *b as f64) * 100.0,
+                UserStatsValue::Percent(p) => *p * 100.0,
             };
             self.custom_stat
                 .get_or_create(&Labels {

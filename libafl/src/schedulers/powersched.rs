@@ -13,17 +13,21 @@ use crate::{
     inputs::UsesInput,
     observers::{MapObserver, ObserversTuple},
     schedulers::{RemovableScheduler, Scheduler},
-    state::{HasCorpus, HasMetadata, UsesState},
+    state::{HasCorpus, HasMetadata, State, UsesState},
     Error,
 };
 
 /// The n fuzz size
 pub const N_FUZZ_SIZE: usize = 1 << 21;
 
-crate::impl_serdeany!(SchedulerMetadata);
+libafl_bolts::impl_serdeany!(SchedulerMetadata);
 
 /// The metadata used for power schedules
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 pub struct SchedulerMetadata {
     /// Powerschedule strategy
     strat: Option<PowerSchedule>,
@@ -173,14 +177,14 @@ pub struct PowerQueueScheduler<O, S> {
 
 impl<O, S> UsesState for PowerQueueScheduler<O, S>
 where
-    S: UsesInput,
+    S: State,
 {
     type State = S;
 }
 
 impl<O, S> RemovableScheduler for PowerQueueScheduler<O, S>
 where
-    S: HasCorpus + HasMetadata + HasTestcase,
+    S: HasCorpus + HasMetadata + HasTestcase + State,
     O: MapObserver,
 {
     #[allow(clippy::cast_precision_loss)]
@@ -249,10 +253,10 @@ where
 
 impl<O, S> Scheduler for PowerQueueScheduler<O, S>
 where
-    S: HasCorpus + HasMetadata + HasTestcase,
+    S: HasCorpus + HasMetadata + HasTestcase + State,
     O: MapObserver,
 {
-    /// Add an entry to the corpus and return its index
+    /// Called when a [`Testcase`] is added to the corpus
     fn on_add(&mut self, state: &mut Self::State, idx: CorpusId) -> Result<(), Error> {
         let current_idx = *state.corpus().current();
 

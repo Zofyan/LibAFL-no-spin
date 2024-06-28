@@ -10,9 +10,10 @@ pub mod tui;
 #[cfg(all(feature = "prometheus_monitor", feature = "std"))]
 #[allow(missing_docs)]
 pub mod prometheus;
+use alloc::string::ToString;
+
 #[cfg(all(feature = "prometheus_monitor", feature = "std"))]
 pub use prometheus::PrometheusMonitor;
-
 #[cfg(feature = "std")]
 pub mod disk;
 use alloc::{fmt::Debug, string::String, vec::Vec};
@@ -21,17 +22,139 @@ use core::{fmt, fmt::Write, time::Duration};
 #[cfg(feature = "std")]
 pub use disk::{OnDiskJSONMonitor, OnDiskTOMLMonitor};
 use hashbrown::HashMap;
+use libafl_bolts::{current_time, format_duration_hms, ClientId};
 use serde::{Deserialize, Serialize};
-
-use crate::bolts::{current_time, format_duration_hms, ClientId};
 
 #[cfg(feature = "afl_exec_sec")]
 const CLIENT_STATS_TIME_WINDOW_SECS: u64 = 5; // 5 seconds
 
-/// User-defined stat types
-/// TODO define aggregation function (avg, median, max, ...)
+/// Definition of how we aggreate this across multiple clients
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum UserStats {
+pub enum AggregatorOps {
+    /// Do nothing
+    None,
+    /// Add stats up
+    Sum,
+    /// Average stats out
+    Avg,
+    /// Get the min
+    Min,
+    /// Get the max
+    Max,
+}
+
+/// The standard aggregator, plug this into the monitor to use
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct Aggregator {
+    // this struct could also have hashmap or vec for caching but for now i'll just keep it simple
+    // for example to calculate the sum you don't have to iterate over all clients (obviously)
+    aggregated: HashMap<String, UserStatsValue>,
+}
+
+impl Aggregator {
+    /// constructor for this aggregator
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            aggregated: HashMap::new(),
+        }
+    }
+
+    /// takes the key and the ref to clients stats then aggregate them all.
+    fn aggregate(&mut self, name: &str, client_stats: &[ClientStats]) {
+        let mut gather = vec![];
+
+        for client in client_stats {
+            if let Some(x) = client.user_monitor.get(name) {
+                gather.push(x);
+            }
+        }
+
+        let (mut init, op) = match gather.first() {
+            Some(x) => (x.value().clone(), x.aggregator_op().clone()),
+            _ => {
+                return;
+            }
+        };
+
+        for item in gather.iter().skip(1) {
+            match op {
+                AggregatorOps::None => {
+                    // Nothing
+                    return;
+                }
+                AggregatorOps::Avg | AggregatorOps::Sum => {
+                    init = match init.stats_add(item.value()) {
+                        Some(x) => x,
+                        _ => {
+                            return;
+                        }
+                    };
+                }
+                AggregatorOps::Min => {
+                    init = match init.stats_min(item.value()) {
+                        Some(x) => x,
+                        _ => {
+                            return;
+                        }
+                    };
+                }
+                AggregatorOps::Max => {
+                    init = match init.stats_max(item.value()) {
+                        Some(x) => x,
+                        _ => {
+                            return;
+                        }
+                    };
+                }
+            }
+        }
+
+        if let AggregatorOps::Avg = op {
+            // if avg then divide last.
+            init = match init.stats_div(gather.len()) {
+                Some(x) => x,
+                _ => {
+                    return;
+                }
+            }
+        }
+
+        self.aggregated.insert(name.to_string(), init);
+    }
+}
+
+/// user defined stats enum
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserStats {
+    value: UserStatsValue,
+    aggregator_op: AggregatorOps,
+}
+
+impl UserStats {
+    /// Get the `AggregatorOps`
+    #[must_use]
+    pub fn aggregator_op(&self) -> &AggregatorOps {
+        &self.aggregator_op
+    }
+    /// Get the actual value for the stats
+    #[must_use]
+    pub fn value(&self) -> &UserStatsValue {
+        &self.value
+    }
+    /// Constructor
+    #[must_use]
+    pub fn new(value: UserStatsValue, aggregator_op: AggregatorOps) -> Self {
+        Self {
+            value,
+            aggregator_op,
+        }
+    }
+}
+
+/// The actual value for the userstats
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum UserStatsValue {
     /// A numerical value
     Number(u64),
     /// A Float value
@@ -40,15 +163,139 @@ pub enum UserStats {
     String(String),
     /// A ratio of two values
     Ratio(u64, u64),
+    /// Percent
+    Percent(f64),
+}
+
+impl UserStatsValue {
+    /// Check if this guy is numeric
+    #[must_use]
+    pub fn is_numeric(&self) -> bool {
+        match &self {
+            Self::Number(_) | Self::Float(_) | Self::Ratio(_, _) | Self::Percent(_) => true,
+            Self::String(_) => false,
+        }
+    }
+
+    /// Divide by the number of elements
+    #[allow(clippy::cast_precision_loss)]
+    pub fn stats_div(&mut self, divisor: usize) -> Option<Self> {
+        match self {
+            Self::Number(x) => Some(Self::Float(*x as f64 / divisor as f64)),
+            Self::Float(x) => Some(Self::Float(*x / divisor as f64)),
+            Self::Percent(x) => Some(Self::Percent(*x / divisor as f64)),
+            Self::Ratio(x, y) => Some(Self::Percent((*x as f64 / divisor as f64) / *y as f64)),
+            Self::String(_) => None,
+        }
+    }
+
+    /// min user stats with the other
+    #[allow(clippy::cast_precision_loss)]
+    pub fn stats_max(&mut self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Number(x), Self::Number(y)) => {
+                if y > x {
+                    Some(Self::Number(*y))
+                } else {
+                    Some(Self::Number(*x))
+                }
+            }
+            (Self::Float(x), Self::Float(y)) => {
+                if y > x {
+                    Some(Self::Float(*y))
+                } else {
+                    Some(Self::Float(*x))
+                }
+            }
+            (Self::Ratio(x, a), Self::Ratio(y, b)) => {
+                let first = *x as f64 / *a as f64;
+                let second = *y as f64 / *b as f64;
+                if first > second {
+                    Some(Self::Percent(first))
+                } else {
+                    Some(Self::Percent(second))
+                }
+            }
+            (Self::Percent(x), Self::Percent(y)) => {
+                if y > x {
+                    Some(Self::Percent(*y))
+                } else {
+                    Some(Self::Percent(*x))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// min user stats with the other
+    #[allow(clippy::cast_precision_loss)]
+    pub fn stats_min(&mut self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Number(x), Self::Number(y)) => {
+                if y > x {
+                    Some(Self::Number(*x))
+                } else {
+                    Some(Self::Number(*y))
+                }
+            }
+            (Self::Float(x), Self::Float(y)) => {
+                if y > x {
+                    Some(Self::Float(*x))
+                } else {
+                    Some(Self::Float(*y))
+                }
+            }
+            (Self::Ratio(x, a), Self::Ratio(y, b)) => {
+                let first = *x as f64 / *a as f64;
+                let second = *y as f64 / *b as f64;
+                if first > second {
+                    Some(Self::Percent(second))
+                } else {
+                    Some(Self::Percent(first))
+                }
+            }
+            (Self::Percent(x), Self::Percent(y)) => {
+                if y > x {
+                    Some(Self::Percent(*x))
+                } else {
+                    Some(Self::Percent(*y))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// add user stats with the other
+    #[allow(clippy::cast_precision_loss)]
+    pub fn stats_add(&mut self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Number(x), Self::Number(y)) => Some(Self::Number(*x + *y)),
+            (Self::Float(x), Self::Float(y)) => Some(Self::Float(*x + *y)),
+            (Self::Percent(x), Self::Percent(y)) => Some(Self::Percent(*x + *y)),
+            (Self::Ratio(x, a), Self::Ratio(y, b)) => {
+                let first = *x as f64 / *a as f64;
+                let second = *y as f64 / *b as f64;
+                Some(Self::Percent(first + second))
+            }
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for UserStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            UserStats::Number(n) => write!(f, "{n}"),
-            UserStats::Float(n) => write!(f, "{n}"),
-            UserStats::String(s) => write!(f, "{s}"),
-            UserStats::Ratio(a, b) => {
+        write!(f, "{}", self.value())
+    }
+}
+
+impl fmt::Display for UserStatsValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self {
+            UserStatsValue::Number(n) => write!(f, "{n}"),
+            UserStatsValue::Float(n) => write!(f, "{}", prettify_float(*n)),
+            UserStatsValue::Percent(n) => write!(f, "{:.3}%", n * 100.0),
+            UserStatsValue::String(s) => write!(f, "{s}"),
+            UserStatsValue::Ratio(a, b) => {
                 if *b == 0 {
                     write!(f, "{a}/{b}")
                 } else {
@@ -83,17 +330,21 @@ fn prettify_float(value: f64) -> String {
 }
 
 /// A simple struct to keep track of client monitor
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClientStats {
     // monitor (maybe we need a separated struct?)
     /// The corpus size for this client
     pub corpus_size: u64,
+    /// The time for the last update of the corpus size
+    pub last_corpus_time: Duration,
     /// The total executions for this client
     pub executions: u64,
     /// The number of executions of the previous state in case a client decrease the number of execution (e.g when restarting without saving the state)
     pub prev_state_executions: u64,
     /// The size of the objectives corpus for this client
     pub objective_size: u64,
+    /// The time for the last update of the objective size
+    pub last_objective_time: Duration,
     /// The last reported executions for this client
     #[cfg(feature = "afl_exec_sec")]
     pub last_window_executions: u64,
@@ -102,6 +353,8 @@ pub struct ClientStats {
     pub last_execs_per_sec: f64,
     /// The last time we got this information
     pub last_window_time: Duration,
+    /// the start time of the client
+    pub start_time: Duration,
     /// User-defined monitor
     pub user_monitor: HashMap<String, UserStats>,
     /// Client performance statistics
@@ -141,6 +394,7 @@ impl ClientStats {
     /// We got a new information about corpus size for this client, insert them.
     pub fn update_corpus_size(&mut self, corpus_size: u64) {
         self.corpus_size = corpus_size;
+        self.last_corpus_time = current_time();
     }
 
     /// We got a new information about objective corpus size for this client, insert them.
@@ -203,12 +457,13 @@ impl ClientStats {
     }
 
     /// Update the user-defined stat with name and value
-    pub fn update_user_stats(&mut self, name: String, value: UserStats) {
-        self.user_monitor.insert(name, value);
+    pub fn update_user_stats(&mut self, name: String, value: UserStats) -> Option<UserStats> {
+        self.user_monitor.insert(name, value)
     }
 
+    #[must_use]
     /// Get a user-defined stat using the name
-    pub fn get_user_stats(&mut self, name: &str) -> Option<&UserStats> {
+    pub fn get_user_stats(&self, name: &str) -> Option<&UserStats> {
         self.user_monitor.get(name)
     }
 
@@ -228,7 +483,10 @@ pub trait Monitor {
     fn client_stats(&self) -> &[ClientStats];
 
     /// Creation time
-    fn start_time(&mut self) -> Duration;
+    fn start_time(&self) -> Duration;
+
+    /// Set creation time
+    fn set_start_time(&mut self, time: Duration);
 
     /// Show the monitor to the user
     fn display(&mut self, event_msg: String, sender_id: ClientId);
@@ -249,7 +507,7 @@ pub trait Monitor {
 
     /// Total executions
     #[inline]
-    fn total_execs(&mut self) -> u64 {
+    fn total_execs(&self) -> u64 {
         self.client_stats()
             .iter()
             .fold(0_u64, |acc, x| acc + x.executions)
@@ -271,16 +529,29 @@ pub trait Monitor {
     }
 
     /// The client monitor for a specific id, creating new if it doesn't exist
-    fn client_stats_mut_for(&mut self, client_id: ClientId) -> &mut ClientStats {
+    fn client_stats_insert(&mut self, client_id: ClientId) {
         let client_stat_count = self.client_stats().len();
         for _ in client_stat_count..(client_id.0 + 1) as usize {
             self.client_stats_mut().push(ClientStats {
                 last_window_time: current_time(),
+                start_time: current_time(),
                 ..ClientStats::default()
             });
         }
+    }
+
+    /// Get mutable reference to client stats
+    fn client_stats_mut_for(&mut self, client_id: ClientId) -> &mut ClientStats {
         &mut self.client_stats_mut()[client_id.0 as usize]
     }
+
+    /// Get immutable reference to client stats
+    fn client_stats_for(&self, client_id: ClientId) -> &ClientStats {
+        &self.client_stats()[client_id.0 as usize]
+    }
+
+    /// Aggregate the results in case there're multiple clients
+    fn aggregate(&mut self, _name: &str) {}
 }
 
 /// Monitor that print exactly nothing.
@@ -303,8 +574,13 @@ impl Monitor for NopMonitor {
     }
 
     /// Time this fuzzing run stated
-    fn start_time(&mut self) -> Duration {
+    fn start_time(&self) -> Duration {
         self.start_time
+    }
+
+    /// Time this fuzzing run stated
+    fn set_start_time(&mut self, time: Duration) {
+        self.start_time = time;
     }
 
     fn display(&mut self, _event_msg: String, _sender_id: ClientId) {}
@@ -367,13 +643,24 @@ impl Monitor for SimplePrintingMonitor {
     }
 
     /// Time this fuzzing run stated
-    fn start_time(&mut self) -> Duration {
+    fn start_time(&self) -> Duration {
         self.start_time
     }
 
+    /// Time this fuzzing run stated
+    fn set_start_time(&mut self, time: Duration) {
+        self.start_time = time;
+    }
+
     fn display(&mut self, event_msg: String, sender_id: ClientId) {
+        let mut userstats = self.client_stats()[sender_id.0 as usize]
+            .user_monitor
+            .iter()
+            .map(|(key, value)| format!("{key}: {value}"))
+            .collect::<Vec<_>>();
+        userstats.sort();
         println!(
-            "[{} #{}] run time: {}, clients: {}, corpus: {}, objectives: {}, executions: {}, exec/sec: {}",
+            "[{} #{}] run time: {}, clients: {}, corpus: {}, objectives: {}, executions: {}, exec/sec: {}, {}",
             event_msg,
             sender_id.0,
             format_duration_hms(&(current_time() - self.start_time)),
@@ -381,7 +668,8 @@ impl Monitor for SimplePrintingMonitor {
             self.corpus_size(),
             self.objective_size(),
             self.total_execs(),
-            self.execs_per_sec_pretty()
+            self.execs_per_sec_pretty(),
+            userstats.join(", ")
         );
 
         // Only print perf monitor if the feature is enabled
@@ -418,7 +706,7 @@ where
         f.debug_struct("SimpleMonitor")
             .field("start_time", &self.start_time)
             .field("client_stats", &self.client_stats)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -437,8 +725,13 @@ where
     }
 
     /// Time this fuzzing run stated
-    fn start_time(&mut self) -> Duration {
+    fn start_time(&self) -> Duration {
         self.start_time
+    }
+
+    /// Set creation time
+    fn set_start_time(&mut self, time: Duration) {
+        self.start_time = time;
     }
 
     fn display(&mut self, event_msg: String, sender_id: ClientId) {
@@ -455,6 +748,7 @@ where
         );
 
         if self.print_user_monitor {
+            self.client_stats_insert(sender_id);
             let client = self.client_stats_mut_for(sender_id);
             for (key, val) in &client.user_monitor {
                 write!(fmt, ", {key}: {val}").unwrap();
@@ -578,6 +872,26 @@ pub struct ClientPerfMonitor {
     timer_start: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Count the imported testcase from other nodes that came with observers
+pub struct ScalabilityMonitor {
+    /// Imported testcase received with observer
+    pub testcase_with_observers: usize,
+    /// Imported testcase received without observer
+    pub testcase_without_observers: usize,
+}
+
+impl ScalabilityMonitor {
+    /// Constructor
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            testcase_with_observers: 0,
+            testcase_without_observers: 0,
+        }
+    }
+}
+
 /// Various features that are measured for performance
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[repr(u8)]
@@ -670,7 +984,7 @@ impl ClientPerfMonitor {
     /// the current clock counter
     #[must_use]
     pub fn new() -> Self {
-        let start_time = crate::bolts::cpu::read_time_counter();
+        let start_time = libafl_bolts::cpu::read_time_counter();
 
         Self {
             start_time,
@@ -694,7 +1008,7 @@ impl ClientPerfMonitor {
     /// Start a timer with the current time counter
     #[inline]
     pub fn start_timer(&mut self) {
-        self.timer_start = Some(crate::bolts::cpu::read_time_counter());
+        self.timer_start = Some(libafl_bolts::cpu::read_time_counter());
     }
 
     /// Update the current [`ClientPerfMonitor`] with the given [`ClientPerfMonitor`]
@@ -720,7 +1034,7 @@ impl ClientPerfMonitor {
             }
             Some(timer_start) => {
                 // Calculate the elapsed time
-                let elapsed = crate::bolts::cpu::read_time_counter() - timer_start;
+                let elapsed = libafl_bolts::cpu::read_time_counter() - timer_start;
 
                 // Reset the timer
                 self.timer_start = None;
@@ -831,10 +1145,10 @@ impl ClientPerfMonitor {
     /// Update the given [`PerfFeature`] with the given `time`
     pub fn update_feature(&mut self, feature: PerfFeature, time: u64) {
         // Get the current stage index as `usize`
-        let stage_index: usize = self.curr_stage.try_into().unwrap();
+        let stage_index: usize = self.curr_stage.into();
 
         // Get the index of the given feature
-        let feature_index: usize = feature.try_into().unwrap();
+        let feature_index: usize = feature.into();
 
         if stage_index >= self.stages.len() {
             self.stages
@@ -968,18 +1282,17 @@ impl Default for ClientPerfMonitor {
 }
 /// `Monitor` Python bindings
 #[cfg(feature = "python")]
+#[allow(clippy::unnecessary_fallible_conversions)]
 #[allow(missing_docs)]
 pub mod pybind {
     use alloc::{boxed::Box, string::String, vec::Vec};
     use core::time::Duration;
 
+    use libafl_bolts::ClientId;
     use pyo3::{prelude::*, types::PyUnicode};
 
     use super::ClientStats;
-    use crate::{
-        bolts::ClientId,
-        monitors::{Monitor, SimpleMonitor},
-    };
+    use crate::monitors::{Monitor, SimpleMonitor};
 
     // TODO create a PyObjectFnMut to pass, track stabilization of https://github.com/rust-lang/rust/issues/29625
 
@@ -995,7 +1308,7 @@ pub mod pybind {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("PythonSimpleMonitor")
                 .field("print_fn", &self.print_fn)
-                .finish()
+                .finish_non_exhaustive()
         }
     }
 
@@ -1060,13 +1373,15 @@ pub mod pybind {
 
     macro_rules! unwrap_me {
         ($wrapper:expr, $name:ident, $body:block) => {
-            crate::unwrap_me_body!($wrapper, $name, $body, PythonMonitorWrapper, { Simple })
+            libafl_bolts::unwrap_me_body!($wrapper, $name, $body, PythonMonitorWrapper, { Simple })
         };
     }
 
     macro_rules! unwrap_me_mut {
         ($wrapper:expr, $name:ident, $body:block) => {
-            crate::unwrap_me_mut_body!($wrapper, $name, $body, PythonMonitorWrapper, { Simple })
+            libafl_bolts::unwrap_me_mut_body!($wrapper, $name, $body, PythonMonitorWrapper, {
+                Simple
+            })
         };
     }
 
@@ -1097,8 +1412,13 @@ pub mod pybind {
         }
 
         /// Time this fuzzing run stated
-        fn start_time(&mut self) -> Duration {
-            unwrap_me_mut!(self.wrapper, m, { m.start_time() })
+        fn start_time(&self) -> Duration {
+            unwrap_me!(self.wrapper, m, { m.start_time() })
+        }
+
+        /// set start time
+        fn set_start_time(&mut self, time: Duration) {
+            unwrap_me_mut!(self.wrapper, m, { m.set_start_time(time) });
         }
 
         fn display(&mut self, event_msg: String, sender_id: ClientId) {

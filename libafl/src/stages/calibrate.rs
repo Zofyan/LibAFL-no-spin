@@ -7,34 +7,37 @@ use alloc::{
 use core::{fmt::Debug, marker::PhantomData, time::Duration};
 
 use hashbrown::HashSet;
+use libafl_bolts::{current_time, impl_serdeany, AsIter, Named};
 use num_traits::Bounded;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    bolts::{current_time, tuples::Named, AsIter},
     corpus::{Corpus, CorpusId, SchedulerTestcaseMetadata},
     events::{Event, EventFirer, LogSeverity},
     executors::{Executor, ExitKind, HasObservers},
     feedbacks::{map::MapFeedbackMetadata, HasObserverName},
     fuzzer::Evaluator,
-    inputs::UsesInput,
-    monitors::UserStats,
+    monitors::{AggregatorOps, UserStats, UserStatsValue},
     observers::{MapObserver, ObserversTuple, UsesObserver},
     schedulers::powersched::SchedulerMetadata,
     stages::Stage,
-    state::{HasClientPerfMonitor, HasCorpus, HasMetadata, HasNamedMetadata, UsesState},
+    state::{HasCorpus, HasExecutions, HasMetadata, HasNamedMetadata, State, UsesState},
     Error,
 };
 
-crate::impl_serdeany!(UnstableEntriesMetadata);
 /// The metadata to keep unstable entries
 /// In libafl, the stability is the number of the unstable entries divided by the size of the map
 /// This is different from AFL++, which shows the number of the unstable entries divided by the number of filled entries.
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UnstableEntriesMetadata {
     unstable_entries: HashSet<usize>,
     map_len: usize,
 }
+impl_serdeany!(UnstableEntriesMetadata);
 
 impl UnstableEntriesMetadata {
     #[must_use]
@@ -74,7 +77,7 @@ const CAL_STAGE_MAX: usize = 8; // AFL++'s CAL_CYCLES + 1
 
 impl<O, OT, S> UsesState for CalibrationStage<O, OT, S>
 where
-    S: UsesInput,
+    S: State,
 {
     type State = S;
 }
@@ -86,7 +89,7 @@ where
     O: MapObserver,
     for<'de> <O as MapObserver>::Entry: Serialize + Deserialize<'de> + 'static,
     OT: ObserversTuple<E::State>,
-    E::State: HasCorpus + HasMetadata + HasClientPerfMonitor + HasNamedMetadata,
+    E::State: HasCorpus + HasMetadata + HasNamedMetadata + HasExecutions,
     Z: Evaluator<E, EM, State = E::State>,
 {
     #[inline]
@@ -216,7 +219,8 @@ where
             i += 1;
         }
 
-        if !unstable_entries.is_empty() {
+        let unstable_found = !unstable_entries.is_empty();
+        if unstable_found {
             // If we see new stable entries executing this new corpus entries, then merge with the existing one
             if state.has_metadata::<UnstableEntriesMetadata>() {
                 let existing = state
@@ -289,18 +293,28 @@ where
             data.set_handicap(handicap);
         }
 
+        *state.executions_mut() += i;
+
         // Send the stability event to the broker
-        if let Some(meta) = state.metadata_map().get::<UnstableEntriesMetadata>() {
-            let unstable_entries = meta.unstable_entries().len();
-            let map_len = meta.map_len();
-            mgr.fire(
-                state,
-                Event::UpdateUserStats {
-                    name: "stability".to_string(),
-                    value: UserStats::Ratio((map_len - unstable_entries) as u64, map_len as u64),
-                    phantom: PhantomData,
-                },
-            )?;
+        if unstable_found {
+            if let Some(meta) = state.metadata_map().get::<UnstableEntriesMetadata>() {
+                let unstable_entries = meta.unstable_entries().len();
+                let map_len = meta.map_len();
+                mgr.fire(
+                    state,
+                    Event::UpdateUserStats {
+                        name: "stability".to_string(),
+                        value: UserStats::new(
+                            UserStatsValue::Ratio(
+                                (map_len - unstable_entries) as u64,
+                                map_len as u64,
+                            ),
+                            AggregatorOps::Avg,
+                        ),
+                        phantom: PhantomData,
+                    },
+                )?;
+            }
         }
 
         Ok(())
