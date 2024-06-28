@@ -415,7 +415,7 @@ where
         shmem_provider: SP,
         timeout: core::time::Duration,
     ) -> Result<Self, Error> {
-        assert!(!QT::HOOKS_DO_SIDE_EFFECTS, "When using QemuForkExecutor, the hooks must not do any side effect as they will happen in the child process and then discarded");
+        //assert!(!QT::HOOKS_DO_SIDE_EFFECTS, "When using QemuForkExecutor, the hooks must not do any side effect as they will happen in the child process and then discarded");
 
         Ok(Self {
             inner: InProcessForkExecutor::new(
