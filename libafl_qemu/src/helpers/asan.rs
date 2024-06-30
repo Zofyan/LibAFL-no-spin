@@ -1019,7 +1019,11 @@ where
     QT: QemuHelperTuple<S>,
 {
     let h = hooks.match_helper_mut::<QemuAsanHelper>().unwrap();
-    None
+    if h.must_instrument(pc) {
+        Some(pc.into())
+    } else {
+        None
+    }
 }
 
 pub fn trace_read1_asan<QT, S>(
