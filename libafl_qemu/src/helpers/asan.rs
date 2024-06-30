@@ -838,32 +838,32 @@ impl QemuAsanHelper {
 
     pub fn read_1(&mut self, qemu: Qemu, pc: GuestAddr, addr: GuestAddr) {
         if self.enabled() && AsanGiovese::is_invalid_access_1(qemu, addr) {
-            //self.rt.report_or_crash(qemu, pc, AsanError::Read(addr, 1));
+            self.rt.report_or_crash(qemu, pc, AsanError::Read(addr, 1));
         }
     }
 
     pub fn read_2(&mut self, qemu: Qemu, pc: GuestAddr, addr: GuestAddr) {
         if self.enabled() && AsanGiovese::is_invalid_access_2(qemu, addr) {
-            //self.rt.report_or_crash(qemu, pc, AsanError::Read(addr, 2));
+            self.rt.report_or_crash(qemu, pc, AsanError::Read(addr, 2));
         }
     }
 
     pub fn read_4(&mut self, qemu: Qemu, pc: GuestAddr, addr: GuestAddr) {
         if self.enabled() && AsanGiovese::is_invalid_access_4(qemu, addr) {
-            //self.rt.report_or_crash(qemu, pc, AsanError::Read(addr, 4));
+            self.rt.report_or_crash(qemu, pc, AsanError::Read(addr, 4));
         }
     }
 
     pub fn read_8(&mut self, qemu: Qemu, pc: GuestAddr, addr: GuestAddr) {
         if self.enabled() && AsanGiovese::is_invalid_access_8(qemu, addr) {
-            //self.rt.report_or_crash(qemu, pc, AsanError::Read(addr, 8));
+            self.rt.report_or_crash(qemu, pc, AsanError::Read(addr, 8));
         }
     }
 
     pub fn read_n(&mut self, qemu: Qemu, pc: GuestAddr, addr: GuestAddr, size: usize) {
         if self.enabled() && AsanGiovese::is_invalid_access(qemu, addr, size) {
-            //self.rt
-            //    .report_or_crash(qemu, pc, AsanError::Read(addr, size));
+            self.rt
+                .report_or_crash(qemu, pc, AsanError::Read(addr, size));
         }
     }
 
@@ -1019,11 +1019,7 @@ where
     QT: QemuHelperTuple<S>,
 {
     let h = hooks.match_helper_mut::<QemuAsanHelper>().unwrap();
-    if h.must_instrument(pc) {
-        Some(pc.into())
-    } else {
-        None
-    }
+    None
 }
 
 pub fn trace_read1_asan<QT, S>(
